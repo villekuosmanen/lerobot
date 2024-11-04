@@ -164,6 +164,14 @@ class ARX5Robot:
         self.is_connected = False
         self.logs = {}
 
+    @property
+    def has_camera(self):
+        return len(self.cameras) > 0
+    
+    @property
+    def num_cameras(self):
+        return len(self.cameras)
+
     def connect(self):
         if self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
