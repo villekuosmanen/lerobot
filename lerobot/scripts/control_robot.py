@@ -188,7 +188,7 @@ def record(
     robot: Robot,
     root: Path,
     repo_id: str,
-    single_task: str,
+    tasks: List[str],
     pretrained_policy_name_or_path: str | None = None,
     policy_overrides: List[str] | None = None,
     fps: int | None = None,
@@ -216,11 +216,8 @@ def record(
     device = None
     use_amp = None
 
-    # TODO: edit this
-    if single_task:
-        task = single_task
-    else:
-        raise NotImplementedError("Only single-task recording is supported for now")
+    # Ensure the number of tasks provided is equal to number of discrete steps.
+    assert len(tasks) == discrete_steps
 
     # Load pretrained policy
     if pretrained_policy_name_or_path is not None:
@@ -324,6 +321,7 @@ def record(
         # First we record current data for every discrete step
         skip_save = False
         for i in range(discrete_steps):
+            task = tasks[i]
             
             record_episode(
                 dataset=datasets[i],
@@ -470,9 +468,11 @@ if __name__ == "__main__":
         "--fps", type=none_or_int, default=None, help="Frames per second (set to None to disable)"
     )
     task_args.add_argument(
-        "--single-task",
+        "--tasks",
         type=str,
-        help="A short but accurate description of the task performed during the recording.",
+        nargs="+",  # This allows one or more arguments
+        help="A short but accurate description of the task performed during the recording. "
+        "Add one task description for every discrete step, if using more than one discrete steps.",
     )
     # TODO(aliberts): add multi-task support
     # task_args.add_argument(
