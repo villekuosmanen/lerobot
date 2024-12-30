@@ -196,6 +196,7 @@ def record(
     episode_time_s: int | float = 10,
     reset_time_s: int | float = 5,
     num_episodes: int = 50,
+    discrete_steps: int = 1,
     video: bool = True,
     run_compute_stats: bool = True,
     push_to_hub: bool = True,
@@ -215,6 +216,7 @@ def record(
     device = None
     use_amp = None
 
+    # TODO: edit this
     if single_task:
         task = single_task
     else:
@@ -232,29 +234,62 @@ def record(
                 f"There is a mismatch between the provided fps ({fps}) and the one from policy config ({policy_fps})."
             )
 
-    if resume:
-        dataset = LeRobotDataset(
-            repo_id,
-            root=root,
-            local_files_only=local_files_only,
-        )
-        dataset.start_image_writer(
-            num_processes=num_image_writer_processes,
-            num_threads=num_image_writer_threads_per_camera * len(robot.cameras),
-        )
-        sanity_check_dataset_robot_compatibility(dataset, robot, fps, video)
+    # Construct dataset(s) we are recording
+    # One dataset constructed for each discrete step in the recording
+    datasets = []
+    if discrete_steps > 1:
+        for i in range(discrete_steps):
+
+            name = f"{repo_id}_step_{i}"
+            if resume:
+                dataset = LeRobotDataset(
+                    name,
+                    root=root,
+                    local_files_only=local_files_only,
+                )
+                dataset.start_image_writer(
+                    num_processes=num_image_writer_processes,
+                    num_threads=num_image_writer_threads_per_camera * len(robot.cameras),
+                )
+                sanity_check_dataset_robot_compatibility(dataset, robot, fps, video)
+            else:
+                # Create empty dataset or load existing saved episodes
+                sanity_check_dataset_name(name, policy)
+                dataset = LeRobotDataset.create(
+                    name,
+                    fps,
+                    root=root,
+                    robot=robot,
+                    use_videos=video,
+                    image_writer_processes=num_image_writer_processes,
+                    image_writer_threads=num_image_writer_threads_per_camera * len(robot.cameras),
+                )
+            datasets.append(dataset)
     else:
-        # Create empty dataset or load existing saved episodes
-        sanity_check_dataset_name(repo_id, policy)
-        dataset = LeRobotDataset.create(
-            repo_id,
-            fps,
-            root=root,
-            robot=robot,
-            use_videos=video,
-            image_writer_processes=num_image_writer_processes,
-            image_writer_threads=num_image_writer_threads_per_camera * len(robot.cameras),
-        )
+        if resume:
+            dataset = LeRobotDataset(
+                repo_id,
+                root=root,
+                local_files_only=local_files_only,
+            )
+            dataset.start_image_writer(
+                num_processes=num_image_writer_processes,
+                num_threads=num_image_writer_threads_per_camera * len(robot.cameras),
+            )
+            sanity_check_dataset_robot_compatibility(dataset, robot, fps, video)
+        else:
+            # Create empty dataset or load existing saved episodes
+            sanity_check_dataset_name(repo_id, policy)
+            dataset = LeRobotDataset.create(
+                repo_id,
+                fps,
+                root=root,
+                robot=robot,
+                use_videos=video,
+                image_writer_processes=num_image_writer_processes,
+                image_writer_threads=num_image_writer_threads_per_camera * len(robot.cameras),
+            )
+        datasets.append(dataset)
 
     if not robot.is_connected:
         robot.connect()
@@ -272,8 +307,9 @@ def record(
     if has_method(robot, "teleop_safety_stop"):
         robot.teleop_safety_stop()
 
+    should_stop_recording = False
     recorded_episodes = 0
-    while True:
+    while not should_stop_recording:
         if recorded_episodes >= num_episodes:
             break
 
@@ -282,52 +318,76 @@ def record(
         # if multi_task:
         #     task = input("Enter your task description: ")
 
-        log_say(f"Recording episode {dataset.num_episodes}", play_sounds)
-        record_episode(
-            dataset=dataset,
-            robot=robot,
-            events=events,
-            episode_time_s=episode_time_s,
-            display_cameras=display_cameras,
-            policy=policy,
-            device=device,
-            use_amp=use_amp,
-            fps=fps,
-        )
+        episode_index = datasets[0].num_episodes
+        log_say(f"Recording episode {episode_index}", play_sounds)
 
-        # Execute a few seconds without recording to give time to manually reset the environment
-        # Current code logic doesn't allow to teleoperate during this time.
-        # TODO(rcadene): add an option to enable teleoperation during reset
-        # Skip reset for the last episode to be recorded
-        if not events["stop_recording"] and (
-            (dataset.num_episodes < num_episodes - 1) or events["rerecord_episode"]
-        ):
-            log_say("Reset the environment", play_sounds)
-            reset_environment(robot, events, reset_time_s)
+        # First we record current data for every discrete step
+        skip_save = False
+        for i in range(discrete_steps):
+            
+            record_episode(
+                dataset=datasets[i],
+                robot=robot,
+                events=events,
+                episode_time_s=episode_time_s,
+                display_cameras=display_cameras,
+                policy=policy,
+                device=device,
+                use_amp=use_amp,
+                fps=fps,
+            )
 
-        if events["rerecord_episode"]:
-            log_say("Re-record episode", play_sounds)
-            events["rerecord_episode"] = False
-            events["exit_early"] = False
-            dataset.clear_episode_buffer()
-            continue
+            # Execute a few seconds without recording to give time to manually reset the environment
+            # Current code logic doesn't allow to teleoperate during this time.
+            # TODO(rcadene): add an option to enable teleoperation during reset
+            # Skip reset for the last episode to be recorded
+            if not events["stop_recording"] or events["rerecord_episode"]:
+                if ((episode_index < num_episodes - 1) or i+1 < discrete_steps):
+                    if i+1 == discrete_steps:
+                        log_say("Reset the environment", play_sounds)
+                    else:
+                        log_say(f"Prepare for step {i+1}", play_sounds)
+                    reset_environment(robot, events, reset_time_s)
 
-        dataset.save_episode(task)
+            if events["rerecord_episode"]:
+                log_say("Re-record episode", play_sounds)
+                events["rerecord_episode"] = False
+                events["exit_early"] = False
+                datasets[i].clear_episode_buffer()
+                
+                # delete all previous discrete steps as well
+                for prev_i in range(i-1, -1, -1):  # Start from i-1, go down to 0
+                    datasets[prev_i].clear_episode_buffer()
+
+                # breaks from discrete steps loop while preserving the recording loop
+                skip_save = True
+                break
+
+            if events["stop_recording"]:
+                should_stop_recording = True
+                break
+        
+        # Then we save them
+        if skip_save:
+            skip_save = False
+        else:
+            for i in range(discrete_steps):         
+                # Increment by one dataset["current_episode_index"]
+                datasets[i].save_episode(task)
+        
         recorded_episodes += 1
-
-        if events["stop_recording"]:
-            break
 
     log_say("Stop recording", play_sounds, blocking=True)
     stop_recording(robot, listener, display_cameras)
 
-    if run_compute_stats:
-        logging.info("Computing dataset statistics")
+    for dataset in datasets:
+        if run_compute_stats:
+            logging.info("Computing dataset statistics")
 
-    dataset.consolidate(run_compute_stats)
+        dataset.consolidate(run_compute_stats)
 
-    if push_to_hub:
-        dataset.push_to_hub(tags=tags)
+        if push_to_hub:
+            dataset.push_to_hub(tags=tags)
 
     log_say("Exiting", play_sounds)
     return dataset
@@ -439,6 +499,12 @@ if __name__ == "__main__":
         help="Use local files only. By default, this script will try to fetch the dataset from the hub if it exists.",
     )
     parser_record.add_argument(
+        "--discrete-steps",
+        type=int,
+        default=1,
+        help="Number of discrete steps requested. If more than one, each step will be recorded in its own dataset. Used for training stepwise models.",
+    )
+    parser_record.add_argument(
         "--warmup-time-s",
         type=int,
         default=10,
@@ -533,12 +599,6 @@ if __name__ == "__main__":
         type=str,
         default="lerobot/test",
         help="Dataset identifier. By convention it should match '{hf_username}/{dataset_name}' (e.g. `lerobot/test`).",
-    )
-    parser_replay.add_argument(
-        "--local-files-only",
-        type=int,
-        default=0,
-        help="Use local files only. By default, this script will try to fetch the dataset from the hub if it exists.",
     )
     parser_replay.add_argument("--episode", type=int, default=0, help="Index of the episode to replay.")
 
