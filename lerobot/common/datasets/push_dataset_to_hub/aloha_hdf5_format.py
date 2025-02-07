@@ -67,13 +67,15 @@ def check_format(raw_dir) -> bool:
 
             for camera in get_cameras(data):
                 assert num_frames == data[f"/observations/images/{camera}"].shape[0]
+                # print(data[f"/observations/images/{camera}"].dtype)
 
-                if compressed_images:
-                    assert data[f"/observations/images/{camera}"].ndim == 2
-                else:
-                    assert data[f"/observations/images/{camera}"].ndim == 4
-                    b, h, w, c = data[f"/observations/images/{camera}"].shape
-                    assert c < h and c < w, f"Expect (h,w,c) image format but ({h=},{w=},{c=}) provided."
+                # x = data[f"/observations/images/{camera}"]
+                # if compressed_images:
+                #     assert data[f"/observations/images/{camera}"].ndim == 2
+                # else:
+                #     assert data[f"/observations/images/{camera}"].ndim == 4
+                #     b, h, w, c = data[f"/observations/images/{camera}"].shape
+                #     assert c < h and c < w, f"Expect (h,w,c) image format but ({h=},{w=},{c=}) provided."
 
 
 def load_from_raw(
@@ -89,6 +91,7 @@ def load_from_raw(
 
     hdf5_files = sorted(raw_dir.glob("episode_*.hdf5"))
     num_episodes = len(hdf5_files)
+    camera_keys = []
 
     ep_dicts = []
     ep_ids = episodes if episodes else range(num_episodes)
@@ -112,39 +115,57 @@ def load_from_raw(
 
             for camera in get_cameras(ep):
                 img_key = f"observation.images.{camera}"
+                if ep_idx == 0:
+                    camera_keys.append(img_key)
 
                 if compressed_images:
                     import cv2
+                    import numpy as np
+
+                    imgs_array = []
+                    image_data = ep[f"/observations/images/{camera}"]
+                    for data in image_data:
+                        # Convert the fixed-length byte string to numpy array
+                        # np.frombuffer creates a view of the bytes as a numpy array
+                        compressed_buffer = np.frombuffer(data, dtype=np.uint8)
+                        # Decode the compressed image data
+                        img = cv2.imdecode(compressed_buffer, cv2.IMREAD_COLOR)
+                        if img is None:
+                            raise ValueError(f"Failed to decode image from camera {camera}")
+                        imgs_array.append(img)
+                    imgs_array = np.array(imgs_array)
+
 
                     # load one compressed image after the other in RAM and uncompress
-                    imgs_array = []
-                    for data in ep[f"/observations/images/{camera}"]:
-                        imgs_array.append(cv2.imdecode(data, 1))
-                    imgs_array = np.array(imgs_array)
+                    # imgs_array = []
+                    # for data in ep[f"/observations/images/{camera}"]:
+                    #     imgs_array.append(cv2.imdecode(data, 1))
+                    # imgs_array = np.array(imgs_array)
 
                 else:
                     # load all images in RAM
                     imgs_array = ep[f"/observations/images/{camera}"][:]
 
-                if video:
-                    # save png images in temporary directory
-                    tmp_imgs_dir = videos_dir / "tmp_images"
-                    save_images_concurrently(imgs_array, tmp_imgs_dir)
+                # if video:
+                #     # save png images in temporary directory
+                #     tmp_imgs_dir = videos_dir / "tmp_images"
+                #     save_images_concurrently(imgs_array, tmp_imgs_dir)
 
-                    # encode images to a mp4 video
-                    fname = f"{img_key}_episode_{ep_idx:06d}.mp4"
-                    video_path = videos_dir / fname
-                    encode_video_frames(tmp_imgs_dir, video_path, fps, **(encoding or {}))
+                #     # encode images to a mp4 video
+                #     fname = f"{img_key}_episode_{ep_idx:06d}.mp4"
+                #     video_path = videos_dir / fname
+                #     encode_video_frames(tmp_imgs_dir, video_path, fps, **(encoding or {}))
 
-                    # clean temporary images directory
-                    shutil.rmtree(tmp_imgs_dir)
+                #     # clean temporary images directory
+                #     shutil.rmtree(tmp_imgs_dir)
 
-                    # store the reference to the video frame
-                    ep_dict[img_key] = [
-                        {"path": f"videos/{fname}", "timestamp": i / fps} for i in range(num_frames)
-                    ]
-                else:
-                    ep_dict[img_key] = [PILImage.fromarray(x) for x in imgs_array]
+                #     # store the reference to the video frame
+                #     ep_dict[img_key] = [
+                #         {"path": f"videos/{fname}", "timestamp": i / fps} for i in range(num_frames)
+                #     ]
+                # else:
+                ep_dict[img_key] = imgs_array
+                ep_dict['size'] = num_frames
 
             ep_dict["observation.state"] = state
             if "/observations/velocity" in ep:
@@ -152,10 +173,12 @@ def load_from_raw(
             if "/observations/effort" in ep:
                 ep_dict["observation.effort"] = effort
             ep_dict["action"] = action
-            ep_dict["episode_index"] = torch.tensor([ep_idx] * num_frames)
+            ep_dict["episode_index"] = ep_idx
             ep_dict["frame_index"] = torch.arange(0, num_frames, 1)
             ep_dict["timestamp"] = torch.arange(0, num_frames, 1) / fps
-            ep_dict["next.done"] = done
+            # ep_dict["next.done"] = done
+            ep_dict["index"] = None
+            ep_dict["task_index"] = None
             # TODO(rcadene): add reward and success by computing them in sim
 
             assert isinstance(ep_idx, int)
@@ -163,11 +186,43 @@ def load_from_raw(
 
         gc.collect()
 
-    data_dict = concatenate_episodes(ep_dicts)
+    motor_features = {
+        "action": {
+                "dtype": "float32",
+                "shape": (14,),
+            },
+            "observation.state": {
+                "dtype": "float32",
+                "shape": (14,),
+            },
+            "observation.effort": {
+                "dtype": "float32",
+                "shape": (14,),
+            },
+    }
+    cam_defaults = {
+        "shape": (480, 640, 3),
+        "names": ["height", "width", "channels"],
+        "info": None,
+    }
+    camera_features = {
+        key: {"dtype": "video", **cam_defaults}
+        for key in camera_keys
+    }
+    default_features = {
+        "timestamp": {"dtype": "float32", "shape": (1,), "names": None},
+        "frame_index": {"dtype": "int64", "shape": (1,), "names": None},
+        "episode_index": {"dtype": "int64", "shape": (1,), "names": None},
+        "index": {"dtype": "int64", "shape": (1,), "names": None},
+        "task_index": {"dtype": "int64", "shape": (1,), "names": None},
+    }
+    features = {**motor_features, **camera_features, **default_features}
+    return ep_dicts, features
+    # data_dict = concatenate_episodes(ep_dicts)
 
-    total_frames = data_dict["frame_index"].shape[0]
-    data_dict["index"] = torch.arange(0, total_frames, 1)
-    return data_dict
+    # total_frames = data_dict["frame_index"].shape[0]
+    # data_dict["index"] = torch.arange(0, total_frames, 1)
+    # return data_dict
 
 
 def to_hf_dataset(data_dict, video) -> Dataset:
@@ -217,17 +272,18 @@ def from_raw_to_lerobot_format(
     check_format(raw_dir)
 
     if fps is None:
-        fps = 50
+        fps = 25
 
-    data_dict = load_from_raw(raw_dir, videos_dir, fps, video, episodes, encoding)
-    hf_dataset = to_hf_dataset(data_dict, video)
-    episode_data_index = calculate_episode_data_index(hf_dataset)
-    info = {
-        "codebase_version": CODEBASE_VERSION,
-        "fps": fps,
-        "video": video,
-    }
-    if video:
-        info["encoding"] = get_default_encoding()
+    ep_dicts = load_from_raw(raw_dir, videos_dir, fps, video, episodes, encoding)
+    return ep_dicts
+    # hf_dataset = to_hf_dataset(data_dict, video)
+    # episode_data_index = calculate_episode_data_index(hf_dataset)
+    # info = {
+    #     "codebase_version": CODEBASE_VERSION,
+    #     "fps": fps,
+    #     "video": video,
+    # }
+    # if video:
+    #     info["encoding"] = get_default_encoding()
 
-    return hf_dataset, episode_data_index, info
+    # return hf_dataset, episode_data_index, info
