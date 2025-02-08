@@ -322,7 +322,7 @@ def train(cfg: TrainPipelineConfig):
 
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device, non_blocking=True)
+                batch[key] = batch[key].to(device, non_blocking=True).to(torch.bfloat16)
 
         train_info = update_policy(
             policy,

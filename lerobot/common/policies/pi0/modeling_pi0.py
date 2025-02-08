@@ -236,7 +236,7 @@ class PI0Policy(PreTrainedPolicy):
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
         """
-
+        config.train_expert_only = True
         super().__init__(config)
         config.validate_features()
         self.config = config
@@ -250,6 +250,7 @@ class PI0Policy(PreTrainedPolicy):
 
         self.language_tokenizer = AutoTokenizer.from_pretrained("google/paligemma-3b-pt-224")
         self.model = PI0FlowMatching(config)
+        self.model = self.model.to(torch.bfloat16)
 
         self.reset()
 
@@ -359,6 +360,7 @@ class PI0Policy(PreTrainedPolicy):
 
             # Normalize from range [0,1] to [-1,1] as expacted by siglip
             img = img * 2.0 - 1.0
+            img = img.to(dtype=torch.bfloat16)
 
             bsize = img.shape[0]
             device = img.device
@@ -622,6 +624,11 @@ class PI0FlowMatching(nn.Module):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
 
+        # Set to match data type of inputs 
+        time_expanded = time_expanded.to(state.dtype)
+        x_t = x_t.to(state.dtype)
+        u_t = u_t.to(state.dtype)
+
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
         )
@@ -643,7 +650,7 @@ class PI0FlowMatching(nn.Module):
         )
         suffix_out = suffix_out[:, -self.config.n_action_steps :]
         # Original openpi code, upcast attention output
-        suffix_out = suffix_out.to(dtype=torch.float32)
+        suffix_out = suffix_out.to(dtype=torch.bfloat16)
         v_t = self.action_out_proj(suffix_out)
 
         losses = F.mse_loss(u_t, v_t, reduction="none")
@@ -656,7 +663,7 @@ class PI0FlowMatching(nn.Module):
 
         if noise is None:
             actions_shape = (bsize, self.config.n_action_steps, self.config.max_action_dim)
-            noise = self.sample_noise(actions_shape, device)
+            noise = self.sample_noise(actions_shape, device).to(dtype=torch.bfloat16)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(
             images, img_masks, lang_tokens, lang_masks
@@ -675,10 +682,10 @@ class PI0FlowMatching(nn.Module):
         )
 
         dt = -1.0 / self.config.num_steps
-        dt = torch.tensor(dt, dtype=torch.float32, device=device)
+        dt = torch.tensor(dt, dtype=torch.bfloat16, device=device)
 
         x_t = noise
-        time = torch.tensor(1.0, dtype=torch.float32, device=device)
+        time = torch.tensor(1.0, dtype=torch.bfloat16, device=device)
         while time >= -dt / 2:
             expanded_time = time.expand(bsize)
             v_t = self.denoise_step(
@@ -727,6 +734,6 @@ class PI0FlowMatching(nn.Module):
         )
         suffix_out = outputs_embeds[1]
         suffix_out = suffix_out[:, -self.config.n_action_steps :]
-        suffix_out = suffix_out.to(dtype=torch.float32)
+        suffix_out = suffix_out.to(dtype=torch.bfloat16)
         v_t = self.action_out_proj(suffix_out)
         return v_t
