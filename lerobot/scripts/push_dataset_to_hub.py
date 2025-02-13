@@ -204,7 +204,14 @@ def push_dataset_to_hub(
     # convert dataset from original raw format to LeRobot format
     from_raw_to_lerobot_format = get_from_raw_to_lerobot_format_fn(raw_format)
 
-    hf_dataset, episode_data_index, info = from_raw_to_lerobot_format(
+    # read language instruction
+    instruction_path = raw_dir / "expanded_instruction_gpt-4-turbo.json"
+    with open(instruction_path, 'r') as f:
+        instruction_data = json.load(f)
+        instruction = instruction_data["instruction"]
+
+
+    ep_dicts, features = from_raw_to_lerobot_format(
         raw_dir,
         videos_dir,
         fps,
@@ -213,55 +220,67 @@ def push_dataset_to_hub(
         encoding,
     )
 
-    lerobot_dataset = LeRobotDataset.from_preloaded(
-        repo_id=repo_id,
-        hf_dataset=hf_dataset,
-        episode_data_index=episode_data_index,
-        info=info,
-        videos_dir=videos_dir,
+    lerobot_dataset = LeRobotDataset.create(
+        repo_id,
+        25,
+        "data",
+        robot_type="arx5_bimanual",
+        features=features,   
     )
-    stats = compute_stats(lerobot_dataset, batch_size, num_workers)
+    # lerobot_dataset = LeRobotDataset(
+    #     repo_id,
+    #     "data",
+    #     local_files_only=True,
+    # )
+    for ep in ep_dicts:
+        lerobot_dataset.save_episode(
+            instruction,
+            episode_data=ep,
+        )
 
-    if local_dir:
-        hf_dataset = hf_dataset.with_format(None)  # to remove transforms that cant be saved
-        hf_dataset.save_to_disk(str(local_dir / "train"))
+    lerobot_dataset.consolidate()
+    lerobot_dataset.push_to_hub()
 
-    if push_to_hub or local_dir:
-        # mandatory for upload
-        save_meta_data(info, stats, episode_data_index, meta_data_dir)
+    # if local_dir:
+    #     hf_dataset = hf_dataset.with_format(None)  # to remove transforms that cant be saved
+    #     hf_dataset.save_to_disk(str(local_dir / "train"))
 
-    if push_to_hub:
-        hf_dataset.push_to_hub(repo_id, revision="main")
-        push_meta_data_to_hub(repo_id, meta_data_dir, revision="main")
-        push_dataset_card_to_hub(repo_id, revision="main")
-        if video:
-            push_videos_to_hub(repo_id, videos_dir, revision="main")
-        create_branch(repo_id, repo_type="dataset", branch=CODEBASE_VERSION)
+    # if push_to_hub or local_dir:
+    #     # mandatory for upload
+    #     save_meta_data(info, stats, episode_data_index, meta_data_dir)
 
-    if tests_data_dir:
-        # get the first episode
-        num_items_first_ep = episode_data_index["to"][0] - episode_data_index["from"][0]
-        test_hf_dataset = hf_dataset.select(range(num_items_first_ep))
-        episode_data_index = {k: v[:1] for k, v in episode_data_index.items()}
+    # if push_to_hub:
+    #     hf_dataset.push_to_hub(repo_id, revision="main")
+    #     push_meta_data_to_hub(repo_id, meta_data_dir, revision="main")
+    #     push_dataset_card_to_hub(repo_id, revision="main")
+    #     if video:
+    #         push_videos_to_hub(repo_id, videos_dir, revision="main")
+    #     create_branch(repo_id, repo_type="dataset", branch=CODEBASE_VERSION)
 
-        test_hf_dataset = test_hf_dataset.with_format(None)
-        test_hf_dataset.save_to_disk(str(tests_data_dir / repo_id / "train"))
+    # if tests_data_dir:
+    #     # get the first episode
+    #     num_items_first_ep = episode_data_index["to"][0] - episode_data_index["from"][0]
+    #     test_hf_dataset = hf_dataset.select(range(num_items_first_ep))
+    #     episode_data_index = {k: v[:1] for k, v in episode_data_index.items()}
 
-        tests_meta_data = tests_data_dir / repo_id / "meta_data"
-        save_meta_data(info, stats, episode_data_index, tests_meta_data)
+    #     test_hf_dataset = test_hf_dataset.with_format(None)
+    #     test_hf_dataset.save_to_disk(str(tests_data_dir / repo_id / "train"))
 
-        # copy videos of first episode to tests directory
-        episode_index = 0
-        tests_videos_dir = tests_data_dir / repo_id / "videos"
-        tests_videos_dir.mkdir(parents=True, exist_ok=True)
-        for key in lerobot_dataset.camera_keys:
-            fname = f"{key}_episode_{episode_index:06d}.mp4"
-            shutil.copy(videos_dir / fname, tests_videos_dir / fname)
+    #     tests_meta_data = tests_data_dir / repo_id / "meta_data"
+    #     save_meta_data(info, stats, episode_data_index, tests_meta_data)
 
-    if local_dir is None:
-        # clear cache
-        shutil.rmtree(meta_data_dir)
-        shutil.rmtree(videos_dir)
+    #     # copy videos of first episode to tests directory
+    #     episode_index = 0
+    #     tests_videos_dir = tests_data_dir / repo_id / "videos"
+    #     tests_videos_dir.mkdir(parents=True, exist_ok=True)
+    #     for key in lerobot_dataset.camera_keys:
+    #         fname = f"{key}_episode_{episode_index:06d}.mp4"
+    #         shutil.copy(videos_dir / fname, tests_videos_dir / fname)
+
+    # if local_dir is None:
+    #     # clear cache
+    #     shutil.rmtree(meta_data_dir)
+    #     shutil.rmtree(videos_dir)
 
     return lerobot_dataset
 

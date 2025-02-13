@@ -64,6 +64,9 @@ from lerobot.common.datasets.video_utils import (
     encode_video_frames,
     get_video_info,
 )
+from lerobot.common.datasets.push_dataset_to_hub.utils import (
+    save_images_concurrently,
+)
 from lerobot.common.robot_devices.robots.utils import Robot
 
 # For maintainers, see lerobot/common/datasets/push_dataset_to_hub/CODEBASE_VERSION.md
@@ -788,6 +791,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         if not episode_data:
             episode_buffer = self.episode_buffer
+        else:
+            episode_buffer = episode_data
 
         episode_length = episode_buffer.pop("size")
         episode_index = episode_buffer["episode_index"]
@@ -839,7 +844,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         )
 
         if encode_videos and len(self.meta.video_keys) > 0:
-            video_paths = self.encode_episode_videos(episode_index)
+            video_paths = self.encode_episode_videos(episode_index, episode_data)
             for key in self.meta.video_keys:
                 episode_buffer[key] = video_paths[key]
 
@@ -902,7 +907,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         for ep_idx in range(self.meta.total_episodes):
             self.encode_episode_videos(ep_idx)
 
-    def encode_episode_videos(self, episode_index: int) -> dict:
+    def encode_episode_videos(self, episode_index: int, episode_data) -> dict:
         """
         Use ffmpeg to convert frames stored as png into mp4 videos.
         Note: `encode_video_frames` is a blocking call. Making it asynchronous shouldn't speedup encoding,
@@ -915,10 +920,17 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if video_path.is_file():
                 # Skip if video is already encoded. Could be the case when resuming data recording.
                 continue
-            img_dir = self._get_image_file_path(
-                episode_index=episode_index, image_key=key, frame_index=0
-            ).parent
-            encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
+
+            # TODO: hack and should remove
+            tmp_imgs_dir = self.root / "images" / f"episode_{episode_index}"
+            save_images_concurrently(episode_data[key], tmp_imgs_dir)
+
+            # encode images to a mp4 video
+            encode_video_frames(tmp_imgs_dir, video_path, self.fps, overwrite=True)
+
+
+
+            # encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
 
         return video_paths
 
@@ -928,7 +940,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         check_timestamps_sync(self.hf_dataset, self.episode_data_index, self.fps, self.tolerance_s)
 
         if len(self.meta.video_keys) > 0:
-            self.encode_videos()
+            # self.encode_videos()
             self.meta.write_video_info()
 
         if not keep_image_files:
