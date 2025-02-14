@@ -58,18 +58,44 @@ def update_policy(
     lr_scheduler=None,
     use_amp: bool = False,
     lock=None,
+    gradient_accumulation_steps: int = 4,
 ):
     """Returns a dictionary of items for logging."""
     start_time = time.perf_counter()
     device = get_device_from_parameters(policy)
     policy.train()
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
-        output_dict = policy.forward(batch)
-        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-        loss = output_dict["loss"]
-    grad_scaler.scale(loss).backward()
+    
+    # Initialize accumulated metrics
+    accumulated_metrics = {}
+    accumulated_loss = 0
+    
+    # Accumulate gradients over multiple forward passes
+    for accum_step in range(gradient_accumulation_steps):
+        # During accumulation loop
+        with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+            output_dict = policy.forward(batch)
+            loss = output_dict["loss"]
+            loss = loss / gradient_accumulation_steps
+            
+        grad_scaler.scale(loss).backward()
 
-    # Unscale the graident of the optimzer's assigned params in-place **prior to gradient clipping**.
+        # Accumulate for logging
+        accumulated_loss += loss.item()  # No need to scale back up
+        
+        # Accumulate other metrics
+        for k, v in output_dict.items():
+            if k == "loss":
+                continue
+            if k not in accumulated_metrics:
+                accumulated_metrics[k] = v if isinstance(v, (int, float)) else v.item()
+            else:
+                accumulated_metrics[k] += v if isinstance(v, (int, float)) else v.item()
+    
+    # Average the accumulated metrics
+    for k in accumulated_metrics:
+        accumulated_metrics[k] /= gradient_accumulation_steps
+
+    # Only perform optimization step after accumulating gradients
     grad_scaler.unscale_(optimizer)
 
     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -78,11 +104,8 @@ def update_policy(
         error_if_nonfinite=False,
     )
 
-    # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
-    # although it still skips optimizer.step() if the gradients contain infs or NaNs.
     with lock if lock is not None else nullcontext():
         grad_scaler.step(optimizer)
-    # Updates the scale for next iteration.
     grad_scaler.update()
 
     optimizer.zero_grad()
@@ -90,22 +113,20 @@ def update_policy(
     if hasattr(policy, "update_ema_modules"):
         policy.update_ema_modules()
 
-    # Step through pytorch scheduler at every batch instead of epoch
+    # Step through pytorch scheduler only after full accumulated update
     if lr_scheduler is not None:
         lr_scheduler.step()
 
     if has_method(policy, "update"):
-        # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
     info = {
-        "loss": loss.item(),
+        "loss": accumulated_loss,  # Already scaled back up for logging
         "grad_norm": float(grad_norm),
         "lr": optimizer.param_groups[0]["lr"],
         "update_s": time.perf_counter() - start_time,
-        **{k: v for k, v in output_dict.items() if k != "loss"},
+        **accumulated_metrics,
     }
-    info.update({k: v for k, v in output_dict.items() if k not in info})
 
     return info
 
@@ -190,6 +211,8 @@ def train(cfg: TrainPipelineConfig):
     cfg.validate()
 
     logging.info(pformat(asdict(cfg)))
+
+    cfg.use_amp = True
 
     # log metrics to terminal and wandb
     logger = Logger(cfg)
