@@ -142,14 +142,14 @@ class MoEACTPolicy(PreTrainedPolicy):
         # Original losses
         l1_loss = (
             F.l1_loss(batch["action"], actions_hat, reduction="none") 
-            * ~batch["action_is_pad"].unsqueeze(-1)
+            * ~batch["action_is_pad"].bool().unsqueeze(-1)
         ).mean()
         
         eoe_targets = batch["next.done"].unsqueeze(1).expand(-1, eoe_hat.size(1))
         eoe_loss = F.binary_cross_entropy_with_logits(
             eoe_hat.squeeze(-1),
             eoe_targets.float(),
-            weight=(~batch["action_is_pad"]).float()
+            weight=(~batch["action_is_pad"].bool()).float()
         )
 
         # Compute KL divergence loss if using VAE
