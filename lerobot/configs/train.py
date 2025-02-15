@@ -114,7 +114,7 @@ class TrainPipelineConfig(HubMixin):
     save_freq: int = 20_000
     offline: OfflineConfig = field(default_factory=OfflineConfig)
     online: OnlineConfig = field(default_factory=OnlineConfig)
-    use_policy_training_preset: bool = False
+    use_policy_training_preset: bool = True
     optimizer: OptimizerConfig | None = None
     scheduler: LRSchedulerConfig | None = None
     eval: EvalConfig = field(default_factory=EvalConfig)

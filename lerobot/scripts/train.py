@@ -51,23 +51,59 @@ from lerobot.scripts.eval import eval_policy
 
 def update_policy(
     policy,
-    batch,
+    dl_iter,
     optimizer,
     grad_clip_norm,
     grad_scaler: GradScaler,
     lr_scheduler=None,
     use_amp: bool = False,
     lock=None,
+    gradient_accumulation_steps: int = 4,
 ):
     """Returns a dictionary of items for logging."""
     start_time = time.perf_counter()
+    
+    # dataloading_s = time.perf_counter() - start_time
+    
     device = get_device_from_parameters(policy)
     policy.train()
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
-        output_dict = policy.forward(batch)
-        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-        loss = output_dict["loss"]
-    grad_scaler.scale(loss).backward()
+    # Initialize accumulated metrics
+    accumulated_metrics = {}
+    accumulated_loss = 0
+
+    # Accumulate gradients over multiple forward passes
+    for accum_step in range(gradient_accumulation_steps):
+        batch = next(dl_iter)
+        for key in batch:
+            if isinstance(batch[key], torch.Tensor):
+                batch[key] = batch[key].to(device, non_blocking=True).to(torch.bfloat16)
+
+        # During accumulation loop
+        with torch.autocast(device_type=device.type) if use_amp else nullcontext():
+            output_dict = policy.forward(batch)
+            loss = output_dict["loss"]
+
+        grad_scaler.scale(loss).backward()
+
+        # Accumulate for logging
+        accumulated_loss += loss.item()  # No need to scale back up
+
+        # Accumulate other metrics
+        for k, v in output_dict.items():
+            if k == "loss":
+                continue
+            if k not in accumulated_metrics:
+                if isinstance(v, (int, float)):
+                    accumulated_metrics[k] = v
+            else:
+                if isinstance(v, (int, float)):
+                    accumulated_metrics[k] += v
+
+    # Average the accumulated metrics
+    for k in accumulated_metrics:
+        accumulated_metrics[k] /= gradient_accumulation_steps
+
+    # Only perform optimization step after accumulating gradients
 
     # Unscale the graident of the optimzer's assigned params in-place **prior to gradient clipping**.
     grad_scaler.unscale_(optimizer)
@@ -107,6 +143,7 @@ def update_policy(
     }
     info.update({k: v for k, v in output_dict.items() if k not in info})
 
+    # info["dataloading_s"] = dataloading_s
     return info
 
 
@@ -117,7 +154,7 @@ def log_train_info(
     grad_norm = info["grad_norm"]
     lr = info["lr"]
     update_s = info["update_s"]
-    dataloading_s = info["dataloading_s"]
+    # dataloading_s = info["dataloading_s"]
 
     # A sample is an (observation,action) pair, where observation and action
     # can be on multiple timestamps. In a batch, we have `batch_size`` number of samples.
@@ -138,7 +175,7 @@ def log_train_info(
         f"lr:{lr:0.1e}",
         # in seconds
         f"updt_s:{update_s:.3f}",
-        f"data_s:{dataloading_s:.3f}",  # if not ~0, you are bottlenecked by cpu or io
+        # f"data_s:{dataloading_s:.3f}",  # if not ~0, you are bottlenecked by cpu or io
     ]
     logging.info(" ".join(log_items))
 
@@ -232,6 +269,8 @@ def train(cfg: TrainPipelineConfig):
 
     step = 0  # number of policy updates (forward + backward + optim)
 
+    from pathlib import Path
+    cfg.checkpoint_path = Path("outputs/train/pi0_coffee_capsule/checkpoints/014000")
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
@@ -316,17 +355,9 @@ def train(cfg: TrainPipelineConfig):
         if offline_step == 0:
             logging.info("Start offline training on a fixed dataset")
 
-        start_time = time.perf_counter()
-        batch = next(dl_iter)
-        dataloading_s = time.perf_counter() - start_time
-
-        for key in batch:
-            if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device, non_blocking=True).to(torch.bfloat16)
-
         train_info = update_policy(
             policy,
-            batch,
+            dl_iter,
             optimizer,
             cfg.optimizer.grad_clip_norm,
             grad_scaler=grad_scaler,
@@ -334,7 +365,6 @@ def train(cfg: TrainPipelineConfig):
             use_amp=cfg.use_amp,
         )
 
-        train_info["dataloading_s"] = dataloading_s
 
         if step % cfg.log_freq == 0:
             log_train_info(logger, train_info, step, cfg, offline_dataset, is_online=False)

@@ -24,6 +24,7 @@ from lerobot.common.logger import TRAINING_STATE
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.utils.utils import get_global_random_state, set_global_random_state
 from lerobot.configs.train import TrainPipelineConfig
+from lerobot.common.optim.optimizers import AdamWConfig
 
 
 def make_optimizer_and_scheduler(
@@ -39,6 +40,7 @@ def make_optimizer_and_scheduler(
         tuple[Optimizer, LRScheduler | None]: The couple (Optimizer, Scheduler). Scheduler can be `None`.
     """
     params = policy.get_optim_params() if cfg.use_policy_training_preset else policy.parameters()
+    cfg.optimizer = AdamWConfig()
     optimizer = cfg.optimizer.build(params)
     lr_scheduler = cfg.scheduler.build(optimizer, cfg.offline.steps) if cfg.scheduler is not None else None
     return optimizer, lr_scheduler
@@ -54,8 +56,8 @@ def load_training_state(checkpoint_dir: Path, optimizer: Optimizer, scheduler: L
     optimizer.load_state_dict(training_state["optimizer"])
     if scheduler is not None:
         scheduler.load_state_dict(training_state["scheduler"])
-    elif "scheduler" in training_state:
-        raise ValueError("The checkpoint contains a scheduler state_dict, but no LRScheduler was provided.")
+    # elif "scheduler" in training_state:
+    #     raise ValueError("The checkpoint contains a scheduler state_dict, but no LRScheduler was provided.")
     # Small HACK to get the expected keys: use `get_global_random_state`.
     set_global_random_state({k: training_state[k] for k in get_global_random_state()})
     return training_state["step"], optimizer, scheduler
