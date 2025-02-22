@@ -110,9 +110,9 @@ class ACTConfig(PreTrainedConfig):
     replace_final_stride_with_dilation: int = False
     # Transformer layers.
     pre_norm: bool = False
-    dim_model: int = 512
+    dim_model: int = 256
     n_heads: int = 8
-    dim_feedforward: int = 3200
+    dim_feedforward: int = 1600
     feedforward_activation: str = "relu"
     n_encoder_layers: int = 4
     # Note: Although the original ACT implementation has 7 for `n_decoder_layers`, there is a bug in the code
@@ -136,6 +136,10 @@ class ACTConfig(PreTrainedConfig):
     optimizer_lr: float = 1e-5
     optimizer_weight_decay: float = 1e-4
     optimizer_lr_backbone: float = 1e-5
+
+    # MoE training
+    top_k = 2
+    num_experts = 4
 
     def __post_init__(self):
         super().__post_init__()
