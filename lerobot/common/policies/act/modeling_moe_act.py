@@ -391,9 +391,8 @@ class MoEACT(nn.Module):
         # Process vision features if needed
         processed_image_features = self._process_vision_features(batch) if self.config.image_features else None
         
-        
         # Get routing decisions
-        routing_logits = self.router(batch)
+        routing_logits = self.router(batch, processed_image_features)
         routing_probs = F.softmax(routing_logits, dim=-1)
         
         # Get top k experts
@@ -455,24 +454,25 @@ class ACTRouter(nn.Module):
     """Router module for MoE ACT."""
     def __init__(self, config: ACTConfig):
         super().__init__()
-        self.config = config  # Need to store config for feature access
+        self.config = config
         
-        # Input projection similar to original ACT encoder input
+        # Input projections
         if config.robot_state_feature:
-            self.robot_state_proj = nn.Linear(config.robot_state_feature.shape[0], config.dim_model)
-        if config.env_state_feature:
-            self.env_state_proj = nn.Linear(config.env_state_feature.shape[0], config.dim_model)
-        if config.image_features:
-            backbone_model = getattr(torchvision.models, config.vision_backbone)(
-                replace_stride_with_dilation=[False, False, config.replace_final_stride_with_dilation],
-                weights=config.pretrained_backbone_weights,
-                norm_layer=FrozenBatchNorm2d,
+            self.robot_state_proj = nn.Sequential(
+                nn.Linear(config.robot_state_feature.shape[0], config.dim_model),
+                nn.LayerNorm(config.dim_model),
+                nn.ReLU()
             )
-            self.backbone = IntermediateLayerGetter(backbone_model, return_layers={"layer4": "feature_map"})
-            self.img_feat_proj = nn.Conv2d(backbone_model.fc.in_features, config.dim_model, kernel_size=1)
-        
-        # Router network
-        router_input_dim = config.dim_model
+            
+        if config.env_state_feature:
+            self.env_state_proj = nn.Sequential(
+                nn.Linear(config.env_state_feature.shape[0], config.dim_model),
+                nn.LayerNorm(config.dim_model),
+                nn.ReLU()
+            )
+            
+        # Router network with better architecture
+        router_input_dim = 0
         if config.robot_state_feature:
             router_input_dim += config.dim_model
         if config.env_state_feature:
@@ -482,18 +482,43 @@ class ACTRouter(nn.Module):
             
         self.router_net = nn.Sequential(
             nn.Linear(router_input_dim, config.dim_model),
+            nn.LayerNorm(config.dim_model),
             nn.ReLU(),
-            nn.Linear(config.dim_model, config.num_experts)
+            nn.Linear(config.dim_model, config.dim_model // 2),
+            nn.LayerNorm(config.dim_model // 2),
+            nn.ReLU(),
+            nn.Linear(config.dim_model // 2, config.num_experts)
         )
         
-    def forward(self, batch: dict[str, Tensor]) -> Tensor:
+        # Temperature parameter for routing
+        self.temperature = nn.Parameter(torch.ones(1) * 0.1)  # Start with sharp routing
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        """Initialize router to produce relatively uniform routing at start."""
+        for name, p in self.router_net.named_parameters():
+            if 'weight' in name:
+                # Small initial weights to start close to uniform routing
+                nn.init.normal_(p, mean=0.0, std=0.01)
+            elif 'bias' in name:
+                nn.init.zeros_(p)
+        
+    def forward(self, 
+                batch: dict[str, Tensor], 
+                processed_image_features: tuple[Tensor, Tensor] | None = None
+               ) -> Tensor:
         """
+        Args:
+            batch: Input batch dictionary
+            processed_image_features: Tuple of (features, pos_embeds) from shared vision backbone
+                features: (seq_len, batch_size, dim) tensor
+                pos_embeds: (seq_len, batch_size, dim) tensor
         Returns:
             routing_logits: (batch_size, num_experts) tensor of logits
         """
         features = []
         
-        # Process each input type similar to original ACT
+        # Process state inputs
         if self.config.robot_state_feature:
             robot_state = self.robot_state_proj(batch["observation.state"])
             features.append(robot_state)
@@ -502,21 +527,25 @@ class ACTRouter(nn.Module):
             env_state = self.env_state_proj(batch["observation.environment_state"])
             features.append(env_state)
             
+        # Use shared processed image features with position information
         if self.config.image_features:
-            # Average pool image features across spatial dimensions
-            img_feats = []
-            for cam_idx in range(batch["observation.images"].shape[-4]):
-                cam_features = self.backbone(batch["observation.images"][:, cam_idx])["feature_map"]
-                cam_features = self.img_feat_proj(cam_features)
-                img_feats.append(cam_features.mean(dim=[-2, -1]))
-            img_feats = torch.cat(img_feats, dim=1)
-            features.append(img_feats)
+            assert processed_image_features is not None, "Must provide processed image features"
+            image_features, pos_embeds = processed_image_features
+            
+            # Combine features with position embeddings
+            features_with_pos = image_features + pos_embeds
+            
+            # Pool over sequence dimension maintaining position-aware features
+            pooled_features = features_with_pos.mean(dim=0)  # (batch_size, dim)
+            features.append(pooled_features)
             
         # Combine features and compute routing logits
         combined_features = torch.cat(features, dim=-1)
         routing_logits = self.router_net(combined_features)
+        routing_logits = routing_logits / self.temperature
         
-        return routing_logits  # Just return the logits, let MoEACT handle the softmax
+        return routing_logits
+
 
 class ACTExpert(nn.Module):
     """Lightweight expert that contains only the necessary components for prediction."""
