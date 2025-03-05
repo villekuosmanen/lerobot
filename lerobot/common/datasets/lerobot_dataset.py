@@ -86,8 +86,7 @@ class LeRobotDatasetMetadata:
     ):
         self.repo_id = repo_id
         self.revision = revision if revision else CODEBASE_VERSION
-        self.root = Path(root) if root is not None else HF_LEROBOT_HOME
-
+        self.root = Path(root) / repo_id if root is not None else HF_LEROBOT_HOME / repo_id
         try:
             if force_cache_sync:
                 raise FileNotFoundError

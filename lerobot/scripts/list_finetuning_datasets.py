@@ -14,14 +14,18 @@ def fetch_lerobot_datasets():
 
 def analyze_dataset_metadata(repo_id: str):
     try:
-        metadata = LeRobotDatasetMetadata(repo_id=repo_id)
+        metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.0")
     except Exception as e:
-        print(f"Error loading metadata for {repo_id}: {str(e)}")
-        return None
+        try:
+            metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.1")
+        except Exception as e:
+            print(f"Error loading metadata for {repo_id}: {str(e)}")
+            return None
     
     # Check version
-    if metadata._version != "v2.0":
-        print(f"Skipping {repo_id}: version {metadata._version}")
+    version_str = str(metadata._version).strip()
+    if version_str not in ["2.0", "2.1"]:
+        print(f"Skipping {repo_id}: version <{version_str}>")
         return None
         
     try:
