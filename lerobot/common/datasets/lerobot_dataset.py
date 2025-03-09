@@ -1079,7 +1079,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         self._datasets = [
             LeRobotDataset(
                 repo_id,
-                root=self.root / repo_id,
+                root=self.root,
                 episodes=episodes[repo_id] if episodes else None,
                 image_transforms=image_transforms,
                 delta_timestamps=delta_timestamps[repo_id],
