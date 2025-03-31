@@ -23,6 +23,7 @@ from pathlib import Path
 from pprint import pformat
 from types import SimpleNamespace
 from typing import Any
+import random
 
 import datasets
 import jsonlines
@@ -631,6 +632,16 @@ def dataloader_collate_fn(batch):
                 # Fallback to list
                 result[key] = [item.get(key, None) for item in batch]
     
+    if 'subtask' in result:
+        if 'expanded_subtasks' in result and random.random() < 0.5:
+            for i, subtasks_list in enumerate(result['expanded_subtasks']):
+                if len(subtasks_list) > 0:
+                    result['task'][i] = random.choice(subtasks_list)
+        else:
+            for i, subtask in enumerate(result['subtask']):
+                if subtask is not None:
+                    result['task'][i] = result['subtask'][i]
+
     return result
 
 
