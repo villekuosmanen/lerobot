@@ -51,6 +51,10 @@ EPISODES_PATH = "meta/episodes.jsonl"
 STATS_PATH = "meta/stats.json"
 EPISODES_STATS_PATH = "meta/episodes_stats.jsonl"
 TASKS_PATH = "meta/tasks.jsonl"
+SAFETY_VIOLATIONS_PATH = "meta/safety_violations.jsonl"
+
+# default value, indicating no safety violation in frame
+SAFETY_VIOLATIONS_NO_VIOLATION = -1
 
 DEFAULT_VIDEO_PATH = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
 DEFAULT_PARQUET_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
@@ -221,7 +225,6 @@ def load_episodes(local_dir: Path) -> dict:
     episodes = load_jsonlines(local_dir / EPISODES_PATH)
     return {item["episode_index"]: item for item in sorted(episodes, key=lambda x: x["episode_index"])}
 
-
 def write_episode_stats(episode_index: int, episode_stats: dict, local_dir: Path):
     # We wrap episode_stats in a dictionary since `episode_stats["episode_index"]`
     # is a dictionary of stats and not an integer.
@@ -236,6 +239,10 @@ def load_episodes_stats(local_dir: Path) -> dict:
         for item in sorted(episodes_stats, key=lambda x: x["episode_index"])
     }
 
+def load_safety_violations(local_dir: Path) -> dict:
+    safety_violations = load_jsonlines(local_dir / SAFETY_VIOLATIONS_PATH)
+    safety_violations = {item["violation_index"]: item["violation"] for item in sorted(safety_violations, key=lambda x: x["violation_index"])}
+    return safety_violations
 
 def backward_compatible_episodes_stats(
     stats: dict[str, dict[str, np.ndarray]], episodes: list[int]
@@ -256,12 +263,10 @@ def load_image_as_numpy(
 
 
 def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
-    """Get a transform function that convert items from Hugging Face dataset (pyarrow)
-    to torch tensors. Importantly, images are converted from PIL, which corresponds to
-    a channel last representation (h w c) of uint8 type, to a torch image representation
-    with channel first (c h w) of float32 type in range [0,1].
-    """
     for key in items_dict:
+        if not items_dict[key]:
+            continue
+            
         first_item = items_dict[key][0]
         if isinstance(first_item, PILImage.Image):
             to_tensor = transforms.ToTensor()
@@ -269,7 +274,14 @@ def hf_transform_to_torch(items_dict: dict[torch.Tensor | None]):
         elif first_item is None:
             pass
         else:
-            items_dict[key] = [x if isinstance(x, str) else torch.tensor(x) for x in items_dict[key]]
+            # Leave strings and lists of strings as is, convert other types to tensors
+            items_dict[key] = [
+                x if (isinstance(x, str) or 
+                      (isinstance(x, list) and any(isinstance(i, str) for i in x)) or
+                      isinstance(x, torch.Tensor))
+                else torch.tensor(x) 
+                for x in items_dict[key]
+            ]
     return items_dict
 
 
@@ -576,6 +588,51 @@ def get_delta_indices(delta_timestamps: dict[str, list[float]], fps: int) -> dic
 
     return delta_indices
 
+def dataloader_collate_fn(batch):
+    # Filter out None values if needed
+    batch = [item for item in batch if item is not None]
+    
+    if len(batch) == 0:
+        return {}
+    
+    # Get all unique keys across all items in the batch
+    all_keys = set()
+    for item in batch:
+        all_keys.update(item.keys())
+    
+    # Special keys that can have variable lengths
+    variable_length_keys = ["expanded_subtasks"]  # Add other variable length keys as needed
+    
+    result = {}
+    for key in all_keys:
+        # Check which items have this key
+        items_with_key = [item for item in batch if key in item]
+        
+        # Skip if no items have this key
+        if not items_with_key:
+            continue
+        
+        if key in variable_length_keys:
+            # For variable length keys, store as a list
+            result[key] = [item.get(key, None) for item in batch]
+        else:
+            try:
+                # Only collect values from items that have this key
+                values = [item[key] for item in batch if key in item]
+                
+                # If all items have this key, use default collate
+                if len(values) == len(batch):
+                    result[key] = torch.utils.data._utils.collate.default_collate(values)
+                else:
+                    # If some items are missing this key, keep as list with None for missing values
+                    result[key] = [item.get(key, None) for item in batch]
+            except Exception as e:
+                print(f"Error collating key {key}: {e}")
+                # Fallback to list
+                result[key] = [item.get(key, None) for item in batch]
+    
+    return result
+
 
 def cycle(iterable):
     """The equivalent of itertools.cycle, but safe for Pytorch dataloaders.
@@ -811,3 +868,23 @@ def validate_episode_buffer(episode_buffer: dict, total_episodes: int, features:
             f"In episode_buffer not in features: {buffer_keys - set(features)}"
             f"In features not in episode_buffer: {set(features) - buffer_keys}"
         )
+
+def get_next_available_index(safety_violations: dict):
+    """
+    Find the smallest non-negative integer that is not currently used as a violation index.
+    
+    Returns:
+        int: The next available violation index
+    """
+    if not safety_violations:
+        return 0
+        
+    # Get all existing indices and convert to integers
+    existing_indices = set(int(idx) for idx in safety_violations.keys())
+    
+    # Find the first missing index
+    next_index = 0
+    while next_index in existing_indices:
+        next_index += 1
+        
+    return next_index
