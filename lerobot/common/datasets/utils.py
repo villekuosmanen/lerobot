@@ -202,6 +202,15 @@ def load_stats(local_dir: Path) -> dict[str, dict[str, np.ndarray]]:
     stats = load_json(local_dir / STATS_PATH)
     return cast_stats_to_numpy(stats)
 
+def clear_stats(local_dir: Path):
+    if not (local_dir / STATS_PATH).exists():
+        return None
+    open(local_dir / STATS_PATH, 'w').close()
+
+def clear_episodes(local_dir: Path):
+    if not (local_dir / EPISODES_PATH).exists():
+        return None
+    open(local_dir / EPISODES_PATH, 'w').close()
 
 def write_task(task_index: int, task: dict, local_dir: Path):
     task_dict = {

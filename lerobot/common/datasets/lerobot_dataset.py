@@ -370,6 +370,11 @@ class LeRobotDatasetMetadata:
         obj.revision = None
         return obj
 
+    def clear_info(self, use_videos):
+        self.info = create_empty_dataset_info(CODEBASE_VERSION, self.info["fps"], self.info["robot_type"], self.info["features"], use_videos)
+        write_json(self.info, self.root / INFO_PATH)
+        return self
+
 
 class LeRobotDataset(torch.utils.data.Dataset):
     def __init__(
