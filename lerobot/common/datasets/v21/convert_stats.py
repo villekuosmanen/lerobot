@@ -1,3 +1,17 @@
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import numpy as np
@@ -10,10 +24,19 @@ from lerobot.common.datasets.utils import write_episode_stats
 
 def sample_episode_video_frames(dataset: LeRobotDataset, episode_index: int, ft_key: str) -> np.ndarray:
     ep_len = dataset.meta.episodes[episode_index]["length"]
-    sampled_indices = sample_indices(ep_len)
-    query_timestamps = dataset._get_query_timestamps(0.0, {ft_key: sampled_indices})
-    video_frames = dataset._query_videos(query_timestamps, episode_index)
-    return video_frames[ft_key].numpy()
+    
+    if ep_len == 1:
+        # For episodes with length 1, directly get the frame without sampling
+        query_timestamps = dataset._get_query_timestamps(0.0, {ft_key: [0]})
+        video_frames = dataset._query_videos(query_timestamps, episode_index)
+        # Add an extra batch dimension to match expected shape (1, C, H, W)
+        return np.expand_dims(video_frames[ft_key].numpy(), axis=0)
+    else:
+        # Normal case with multiple frames
+        sampled_indices = sample_indices(ep_len)
+        query_timestamps = dataset._get_query_timestamps(0.0, {ft_key: sampled_indices})
+        video_frames = dataset._query_videos(query_timestamps, episode_index)
+        return video_frames[ft_key].numpy()
 
 
 def convert_episode_stats(dataset: LeRobotDataset, ep_idx: int):
@@ -71,6 +94,8 @@ def check_aggregate_stats(
     agg_stats = aggregate_stats(list(dataset.meta.episodes_stats.values()))
     for key, ft in dataset.features.items():
         # These values might need some fine-tuning
+        if ft["dtype"] == "string" or ft["dtype"] == "list":
+            continue
         if ft["dtype"] == "video":
             # to account for image sub-sampling
             rtol, atol = video_rtol_atol

@@ -17,7 +17,7 @@ import contextlib
 import logging
 import shutil
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import datasets
 import numpy as np
@@ -38,6 +38,8 @@ from lerobot.common.datasets.utils import (
     DEFAULT_IMAGE_PATH,
     INFO_PATH,
     TASKS_PATH,
+    SAFETY_VIOLATIONS_PATH,
+    SAFETY_VIOLATIONS_NO_VIOLATION,
     append_jsonlines,
     backward_compatible_episodes_stats,
     check_delta_timestamps,
@@ -58,17 +60,20 @@ from lerobot.common.datasets.utils import (
     load_info,
     load_stats,
     load_tasks,
+    load_safety_violations,
     validate_episode_buffer,
     validate_frame,
     write_episode,
     write_episode_stats,
     write_info,
     write_json,
+    get_next_available_index,
 )
 from lerobot.common.datasets.video_utils import (
     VideoFrame,
-    decode_video_frames_torchvision,
+    decode_video_frames,
     encode_video_frames,
+    get_safe_default_codec,
     get_video_info,
 )
 from lerobot.common.robot_devices.robots.utils import Robot
@@ -96,7 +101,7 @@ class LeRobotDatasetMetadata:
                 self.revision = get_safe_version(self.repo_id, self.revision)
 
             (self.root / "meta").mkdir(exist_ok=True, parents=True)
-            self.pull_from_repo(allow_patterns="meta/")
+            self.pull_from_repo(allow_patterns="meta/", force_cache_sync=force_cache_sync)
             self.load_metadata()
 
     def load_metadata(self):
@@ -104,6 +109,10 @@ class LeRobotDatasetMetadata:
         check_version_compatibility(self.repo_id, self._version, CODEBASE_VERSION)
         self.tasks, self.task_to_task_index = load_tasks(self.root)
         self.episodes = load_episodes(self.root)
+
+        # load safety violations
+        self.load_safety_violations()
+        
         if self._version < packaging.version.parse("v2.1"):
             self.stats = load_stats(self.root)
             self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
@@ -115,15 +124,33 @@ class LeRobotDatasetMetadata:
         self,
         allow_patterns: list[str] | str | None = None,
         ignore_patterns: list[str] | str | None = None,
+        force_cache_sync: bool = False,
     ) -> None:
-        snapshot_download(
-            self.repo_id,
-            repo_type="dataset",
-            revision=self.revision,
-            local_dir=self.root,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-        )
+        if force_cache_sync:
+            snapshot_download(
+                self.repo_id,
+                repo_type="dataset",
+                force_download=True,    # instead of revision (which is implemented by a tag and may be wrong) we force download of most recent main.
+                local_dir=self.root,
+                allow_patterns=allow_patterns,
+                ignore_patterns=ignore_patterns,
+            )
+        else:
+            snapshot_download(
+                self.repo_id,
+                repo_type="dataset",
+                revision=self.revision,
+                local_dir=self.root,
+                allow_patterns=allow_patterns,
+                ignore_patterns=ignore_patterns,
+            )
+
+    def load_safety_violations(self):
+        try:
+            safety_violations = load_safety_violations(self.root)
+            self.safety_violations = safety_violations
+        except Exception:
+            pass
 
     @property
     def _version(self) -> packaging.version.Version:
@@ -467,18 +494,18 @@ class LeRobotDataset(torch.utils.data.Dataset):
             download_videos (bool, optional): Flag to download the videos. Note that when set to True but the
                 video files are already present on local disk, they won't be downloaded again. Defaults to
                 True.
-            video_backend (str | None, optional): Video backend to use for decoding videos. There is currently
-                a single option which is the pyav decoder used by Torchvision. Defaults to pyav.
+            video_backend (str | None, optional): Video backend to use for decoding videos. Defaults to torchcodec when available int the platform; otherwise, defaults to 'pyav'.
+                You can also use the 'pyav' decoder used by Torchvision, which used to be the default option, or 'video_reader' which is another decoder of Torchvision.
         """
         super().__init__()
         self.repo_id = repo_id
-        self.root = Path(root) if root else HF_LEROBOT_HOME
+        self.root = Path(root) if root else HF_LEROBOT_HOME / repo_id
         self.image_transforms = image_transforms
         self.delta_timestamps = delta_timestamps
         self.episodes = episodes
         self.tolerance_s = tolerance_s
         self.revision = revision if revision else CODEBASE_VERSION
-        self.video_backend = video_backend if video_backend else "pyav"
+        self.video_backend = video_backend if video_backend else get_safe_default_codec()
         self.delta_indices = None
 
         # Unused attributes
@@ -579,15 +606,26 @@ class LeRobotDataset(torch.utils.data.Dataset):
         self,
         allow_patterns: list[str] | str | None = None,
         ignore_patterns: list[str] | str | None = None,
+        force_cache_sync: bool = False,
     ) -> None:
-        snapshot_download(
-            self.repo_id,
-            repo_type="dataset",
-            revision=self.revision,
-            local_dir=self.root,
-            allow_patterns=allow_patterns,
-            ignore_patterns=ignore_patterns,
-        )
+        if force_cache_sync:
+            snapshot_download(
+                self.repo_id,
+                repo_type="dataset",
+                force_download=True,    # instead of revision (which is implemented by a tag and may be wrong) we force download of most recent main.
+                local_dir=self.root,
+                allow_patterns=allow_patterns,
+                ignore_patterns=ignore_patterns,
+            )
+        else:
+            snapshot_download(
+                self.repo_id,
+                repo_type="dataset",
+                revision=self.revision,
+                local_dir=self.root,
+                allow_patterns=allow_patterns,
+                ignore_patterns=ignore_patterns,
+            )
 
     def download_episodes(self, download_videos: bool = True) -> None:
         """Downloads the dataset from the given 'repo_id' at the provided version. If 'episodes' is given, this
@@ -700,7 +738,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         return {
             key: torch.stack(self.hf_dataset.select(q_idx)[key])
             for key, q_idx in query_indices.items()
-            if key not in self.meta.video_keys
+            if key not in self.meta.video_keys + ["subtask", "expanded_subtasks"]
         }
 
     def _query_videos(self, query_timestamps: dict[str, list[float]], ep_idx: int) -> dict[str, torch.Tensor]:
@@ -712,9 +750,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         item = {}
         for vid_key, query_ts in query_timestamps.items():
             video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
-            frames = decode_video_frames_torchvision(
-                video_path, query_ts, self.tolerance_s, self.video_backend
-            )
+            frames = decode_video_frames(video_path, query_ts, self.tolerance_s, self.video_backend)
             item[vid_key] = frames.squeeze(0)
 
         return item
@@ -846,6 +882,31 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         self.episode_buffer["size"] += 1
 
+    def _get_frames_by_timestamp_range(self, episode_id: int, start_ts: float, end_ts: float) -> dict:
+        """
+        Select frames from the dataset where episode_index matches episode_id and 
+        timestamps are within the specified range.
+        
+        Args:
+            episode_id (int): Episode ID to filter by
+            start_ts (float): Start timestamp (inclusive)
+            end_ts (float): End timestamp (exclusive)
+            
+        Returns:
+            dict: Selected frames with their indices
+        """
+        # Create a filter for the dataset
+        def filter_func(example):
+            episode_matches = example["episode_index"] == episode_id
+            ts_in_range = (example["timestamp"] >= start_ts) & (example["timestamp"] < end_ts)
+            return episode_matches & ts_in_range
+        
+        # Apply the filter to the dataset
+        filtered_data = self.hf_dataset.filter(filter_func)
+        
+        # Return the filtered data
+        return filtered_data
+
     def save_episode(
         self,
         episode_data: dict | None = None,
@@ -936,6 +997,57 @@ class LeRobotDataset(torch.utils.data.Dataset):
         ep_data_path.parent.mkdir(parents=True, exist_ok=True)
         ep_dataset.to_parquet(ep_data_path)
 
+    def save_modified_dataset(self):
+        """
+        Save the modified hf_dataset back to disk.
+        This method should be called after making modifications like adding annotations.
+        """
+        # Group by episode_index
+        episode_indices = set(torch.stack(self.hf_dataset["episode_index"]).numpy())
+        
+        for ep_idx in episode_indices:
+            # Filter dataset for the current episode
+            def filter_func(example):
+                return example["episode_index"] == ep_idx
+            
+            ep_dataset = self.hf_dataset.filter(filter_func)
+            
+            # Convert to format expected by to_parquet
+            ep_dataset.set_format(None)  # Reset format if any was set
+            
+            # Get the path for this episode's parquet file
+            ep_data_path = self.root / self.meta.get_data_file_path(ep_index=ep_idx)
+            ep_data_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Save to parquet
+            print(f"Saving modified data for episode {ep_idx} to {ep_data_path}")
+            ep_dataset.to_parquet(ep_data_path)
+        
+        # Save updated metadata
+        write_info(self.meta.info, self.meta.root)
+
+    def save_modified_episode(self, episode_id):
+        """
+        Save the modified hf_dataset back to disk.
+        This method should be called after making modifications like adding annotations.
+        """
+        # Filter dataset for the current episode
+        def filter_func(example):
+            return example["episode_index"] == episode_id
+        
+        ep_dataset = self.hf_dataset.filter(filter_func)
+        
+        # Convert to format expected by to_parquet
+        ep_dataset.set_format(None)  # Reset format if any was set
+        
+        # Get the path for this episode's parquet file
+        ep_data_path = self.root / self.meta.get_data_file_path(ep_index=episode_id)
+        ep_data_path.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Save to parquet
+        print(f"Saving modified data for episode {episode_id} to {ep_data_path}")
+        ep_dataset.to_parquet(ep_data_path)
+
     def clear_episode_buffer(self) -> None:
         episode_index = self.episode_buffer["episode_index"]
         if self.image_writer is not None:
@@ -1002,6 +1114,240 @@ class LeRobotDataset(torch.utils.data.Dataset):
             encode_video_frames(img_dir, video_path, self.fps, overwrite=True)
 
         return video_paths
+    
+    def add_safety_violation(
+        self,
+        violation_description: str,
+        episode_id: int,
+        start_frame_index: int,
+        end_frame_index: int,
+    ) -> int:
+        """
+        Add a new safety violation to the dataset's metadata and apply it to 
+        frames within the specified range.
+        
+        Args:
+            violation_description: String describing the safety violation
+            episode_id: Episode index where the violation occurs
+            start_frame_index: Starting frame index within the episode (inclusive)
+            end_frame_index: Ending frame index within the episode (exclusive)
+            
+        Returns:
+            The index of the newly added safety violation
+        """
+        # Create safety_violations structure if it doesn't exist
+        if not hasattr(self.meta, 'safety_violations'):
+            self.meta.safety_violations = {}
+
+        violation_index = get_next_available_index(self.meta.safety_violations)
+
+        self.meta.safety_violations[violation_index] = violation_description
+        
+        # Save to jsonl file
+        safety_violation_dict = {
+            "violation_index": violation_index,
+            "violation": violation_description,
+        }
+        
+        # Create the safety_violations.jsonl file if it doesn't exist
+        violations_path = self.root / SAFETY_VIOLATIONS_PATH
+        violations_path.parent.mkdir(exist_ok=True, parents=True)
+        append_jsonlines(safety_violation_dict, violations_path)
+        
+        # Update info file with the new violation metadata
+        if "total_safety_violations" not in self.meta.info:
+            self.meta.info["total_safety_violations"] = 1
+        else:
+            self.meta.info["total_safety_violations"] += 1
+            
+        # Write updated info to disk
+        write_json(self.meta.info, self.root / "meta/info.json")
+            
+        # Apply the violation to the specified frames
+        self.apply_safety_violation_to_frames(
+            violation_index, 
+            episode_id,
+            start_frame_index,
+            end_frame_index
+        )
+        
+        return violation_index
+
+    def apply_safety_violation_to_frames(
+        self,
+        violation_index: int,
+        episode_id: int,
+        start_frame_index: int,
+        end_frame_index: int
+    ):
+        """
+        Apply a safety violation to all frames within the specified range.
+        
+        Args:
+            violation_index: Index of the safety violation to apply
+            episode_id: Episode index where the violation occurs
+            start_frame_index: Starting frame index within the episode (inclusive)
+            end_frame_index: Ending frame index within the episode (exclusive)
+        """
+        # Check if the safety_violation_index column exists in the dataset
+        column_exists = "safety_violation_index" in self.hf_dataset.features
+        
+        # Define a filter function to find frames in the specified range
+        def filter_violation_frames(example):
+            episode_match = example["episode_index"] == episode_id
+            frame_range = (example["frame_index"] >= start_frame_index) & (example["frame_index"] < end_frame_index)
+            return episode_match & frame_range
+        
+        # Get frames to apply the violation to
+        frames_with_violation = self.hf_dataset.filter(filter_violation_frames)
+        
+        if len(frames_with_violation) == 0:
+            print(f"Warning: No frames found in episode {episode_id} with frame indices {start_frame_index}-{end_frame_index}")
+            return
+        
+        # Extract global indices for these frames
+        global_indices = [frame["index"].item() for frame in frames_with_violation]
+        
+        # If column doesn't exist, we need to add it to the whole dataset with default values
+        if not column_exists:
+            # Create a new column filled with the default NO_VIOLATION value
+            safety_violation_column = [SAFETY_VIOLATIONS_NO_VIOLATION] * len(self.hf_dataset)
+                        
+            # Update the values for frames with violations
+            for idx in global_indices:
+                safety_violation_column[idx] = violation_index
+            
+            # Add the column to the dataset
+            print("Adding 'safety_violation_index' column to dataset")
+            self.hf_dataset = self.hf_dataset.add_column("safety_violation_index", safety_violation_column)
+            
+            # Update dataset features metadata
+            self.meta.info["features"]["safety_violation_index"] = {
+                "dtype": "int64",
+                "shape": (1,),
+                "names": None
+            }
+            self.save_modified_dataset() 
+        else:
+            # If the column already exists, create a new dataset with updated values
+            
+            # First, get the current safety violation indices
+            safety_violation_column = [index.item() if hasattr(index, 'item') else index for index in self.hf_dataset["safety_violation_index"]]
+                        
+            # Update the values for frames with violations
+            for idx in global_indices:
+                safety_violation_column[idx] = violation_index
+            
+            # Update the column in the dataset
+            print("Updating 'safety_violation_index' column in dataset")
+            self.hf_dataset = self.hf_dataset.remove_columns(["safety_violation_index"])
+            self.hf_dataset = self.hf_dataset.add_column("safety_violation_index", safety_violation_column)
+            self.save_modified_episode(episode_id=episode_id)
+
+    def delete_safety_violation(
+        self,
+        violation_index: int,
+        episode_id: int,
+    ) -> bool:
+        """
+        Delete a safety violation from the dataset's metadata and reset any frames 
+        that have this violation index back to the default (no violation).
+        
+        Args:
+            violation_index: Index of the safety violation to delete
+            episode_id: episode index to limit scope of frame updates
+                
+        Returns:
+            bool: True if the violation was found and deleted, False otherwise
+        """
+        # Check if safety_violations structure exists
+        if not hasattr(self.meta, 'safety_violations') or violation_index not in self.meta.safety_violations:
+            print(f"Warning: Safety violation with index {violation_index} not found")
+            return False
+        
+        # Get the violation description (for logging purposes)
+        violation_description = self.meta.safety_violations.get(violation_index)
+        
+        # Remove from metadata
+        del self.meta.safety_violations[violation_index]
+        
+        # Update info file to decrement the total count
+        if "total_safety_violations" in self.meta.info:
+            self.meta.info["total_safety_violations"] = max(0, self.meta.info["total_safety_violations"] - 1)
+            write_json(self.meta.info, self.root / "meta/info.json")
+        
+        # Also update the JSONL file by rewriting it
+        violations_path = self.root / SAFETY_VIOLATIONS_PATH
+        if violations_path.exists():
+            # Back up the original file
+            temp_path = violations_path.with_suffix('.jsonl.bak')
+            shutil.copy(violations_path, temp_path)
+            
+            try:
+                # Delete the original file
+                violations_path.unlink()
+                
+                # Rewrite with all violations except the deleted one
+                for idx, desc in self.meta.safety_violations.items():
+                    safety_violation_dict = {
+                        "violation_index": idx,
+                        "violation": desc,
+                    }
+                    append_jsonlines(safety_violation_dict, violations_path)
+                
+                # If successful, remove the backup
+                temp_path.unlink()
+            except Exception as e:
+                # If an error occurs, restore from backup
+                if not violations_path.exists() and temp_path.exists():
+                    shutil.copy(temp_path, violations_path)
+                if temp_path.exists():
+                    temp_path.unlink()
+                raise e
+        
+        # Check if safety_violation_index column exists in the dataset
+        if "safety_violation_index" not in self.hf_dataset.features:
+            return True  # Nothing to update in the dataset
+        
+        # Only look for frames in the specified episode
+        def filter_violation_frames(example):
+            episode_match = example["episode_index"] == episode_id
+            has_violation = example["safety_violation_index"] == violation_index
+            return episode_match & has_violation
+        
+        # Get frames that have this violation
+        frames_with_violation = self.hf_dataset.filter(filter_violation_frames)
+        
+        if len(frames_with_violation) == 0:
+            print(f"No frames found with safety violation index {violation_index}")
+            return True
+        
+        print(f"Updating {len(frames_with_violation)} frames to remove safety violation '{violation_description}'")
+        
+        # Get all indices for affected frames
+        affected_indices = [frame["index"].item() for frame in frames_with_violation]
+        
+        # Get all affected episodes for selective saving
+        affected_episodes = set([frame["episode_index"].item() for frame in frames_with_violation])
+        
+        # First, get the current safety violation indices
+        safety_violation_column = [index.item() if hasattr(index, 'item') else index 
+                                for index in self.hf_dataset["safety_violation_index"]]
+        
+        # Update the values for affected frames to NO_VIOLATION
+        for idx in affected_indices:
+            safety_violation_column[idx] = SAFETY_VIOLATIONS_NO_VIOLATION
+        
+        # Update the column in the dataset
+        print("Updating 'safety_violation_index' column in dataset")
+        self.hf_dataset = self.hf_dataset.remove_columns(["safety_violation_index"])
+        self.hf_dataset = self.hf_dataset.add_column("safety_violation_index", safety_violation_column)
+        
+        # Save only the affected episodes for efficiency
+        for ep_id in affected_episodes:
+            self.save_modified_episode(episode_id=ep_id)
+        
+        return True
 
     @classmethod
     def create(
@@ -1047,7 +1393,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.delta_timestamps = None
         obj.delta_indices = None
         obj.episode_data_index = None
-        obj.video_backend = video_backend if video_backend is not None else "pyav"
+        obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
         return obj
 
 
@@ -1068,11 +1414,12 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         tolerances_s: dict | None = None,
         download_videos: bool = True,
         video_backend: str | None = None,
+        force_cache_sync: bool = False,
     ):
         super().__init__()
         self.repo_ids = repo_ids
         self.root = Path(root) if root else HF_LEROBOT_HOME
-        self.tolerances_s = tolerances_s if tolerances_s else {repo_id: 1e-4 for repo_id in repo_ids}
+        self.tolerances_s = tolerances_s if tolerances_s else dict.fromkeys(repo_ids, 0.0001)
         # Construct the underlying datasets passing everything but `transform` and `delta_timestamps` which
         # are handled by this class.
         self._datasets = [
@@ -1085,6 +1432,7 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
                 tolerance_s=self.tolerances_s[repo_id],
                 download_videos=download_videos,
                 video_backend=video_backend,
+                force_cache_sync=force_cache_sync,
             )
             for repo_id in repo_ids
         ]
@@ -1114,6 +1462,9 @@ class MultiLeRobotDataset(torch.utils.data.Dataset):
         # TODO(rcadene, aliberts): We should not perform this aggregation for datasets
         # with multiple robots of different ranges. Instead we should have one normalization
         # per robot.
+        for dataset in self._datasets:
+            if "count" not in dataset.meta.stats['action'].keys():
+                print(f'{dataset.repo_id}: NO COUNT')
         self.stats = aggregate_stats([dataset.meta.stats for dataset in self._datasets])
 
     @property

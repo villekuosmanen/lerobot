@@ -28,7 +28,7 @@ from torch.optim import Optimizer
 from lerobot.common.datasets.lerobot_dataset import MultiLeRobotDataset, LeRobotDatasetMetadata
 from lerobot.common.datasets.factory import make_dataset
 from lerobot.common.datasets.sampler import EpisodeAwareSampler
-from lerobot.common.datasets.utils import cycle
+from lerobot.common.datasets.utils import cycle, dataloader_collate_fn
 from lerobot.common.envs.factory import make_env
 from lerobot.common.optim.factory import make_optimizer_and_scheduler
 from lerobot.common.policies.factory import make_policy
@@ -54,122 +54,6 @@ from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
 from lerobot.scripts.eval import eval_policy
 
-
-# TODO: move elsewhere:
-def merge_feature_stats(datasets_stats: List[Dict[str, Dict[str, np.ndarray]]], 
-                       total_frames: List[int]) -> Dict[str, Dict[str, np.ndarray]]:
-    """
-    Merge statistics from multiple LeRobot datasets.
-    
-    Args:
-        datasets_stats: List of statistics dictionaries from each dataset
-        total_frames: List of frame counts for each dataset
-    
-    Returns:
-        Dictionary containing merged statistics for all features
-    """
-    if not datasets_stats:
-        return {}
-    
-    # Get all unique feature keys across datasets
-    all_features = set()
-    for stats in datasets_stats:
-        all_features.update(stats.keys())
-    
-    merged_stats = {}
-    total_frames_array = np.array(total_frames)
-    N = np.sum(total_frames_array)
-    
-    for feature in all_features:
-        # Initialize with zeros for datasets that might not have this feature
-        means = []
-        stds = []
-        maxs = []
-        mins = []
-        
-        # Collect stats for this feature from all datasets
-        for stats in datasets_stats:
-            if feature in stats:
-                means.append(stats[feature]["mean"])
-                stds.append(stats[feature]["std"])
-                maxs.append(stats[feature]["max"])
-                mins.append(stats[feature]["min"])
-            else:
-                # If feature missing in this dataset, use placeholder
-                shape = means[0].shape if means else None
-                if shape is None:
-                    continue
-                means.append(np.zeros_like(means[0]))
-                stds.append(np.zeros_like(means[0]))
-                maxs.append(np.full_like(means[0], np.inf))
-                mins.append(np.full_like(means[0], -np.inf))
-        
-        if not means:  # Skip if feature not found in any dataset
-            continue
-            
-        # Convert lists to arrays for vectorized operations
-        means = np.array(means)
-        stds = np.array(stds)
-        maxs = np.array(maxs)
-        mins = np.array(mins)
-        
-        # Calculate combined statistics
-        # Ensure proper broadcasting by reshaping total_frames_array
-        weights = total_frames_array.reshape(-1, 1)
-        
-        # Weighted mean
-        combined_mean = np.sum(means * weights, axis=0) / N
-        
-        # Combined standard deviation
-        # We need to use the correct formula with individual means
-        combined_variance = np.sum(
-            weights * (stds**2 + (means - combined_mean)**2),
-            axis=0
-        ) / N
-        combined_std = np.sqrt(combined_variance)
-        
-        # Global min and max
-        combined_max = np.max(maxs, axis=0)
-        combined_min = np.min(mins, axis=0)
-        
-        # Validate results - mean should be within min and max
-        assert np.all(combined_mean <= combined_max + 1e-5), f"Mean exceeds max for feature {feature}"
-        assert np.all(combined_mean >= combined_min - 1e-5), f"Mean is less than min for feature {feature}"
-        
-        merged_stats[feature] = {
-            "mean": combined_mean,
-            "std": combined_std,
-            "max": combined_max,
-            "min": combined_min
-        }
-    
-    return merged_stats
-
-def merge_lerobot_datasets_metadata(datasets: List[LeRobotDatasetMetadata]) -> Dict[str, Any]:
-    """
-    Merge metadata from multiple LeRobot datasets.
-    
-    Args:
-        datasets: List of LeRobotDatasetMetadata objects
-    
-    Returns:
-        Dictionary containing merged metadata
-    """
-    if not datasets:
-        return {}
-    
-    total_frames = [ds.total_frames for ds in datasets]
-    # merged_stats = merge_feature_stats([ds.stats for ds in datasets], total_frames)
-    
-    # Additional metadata merging can be added here if needed
-    # For example, merging tasks, episodes, etc.
-    
-    return {
-        # "stats": merged_stats,
-        "total_frames": sum(total_frames),
-        "total_episodes": sum(ds.total_episodes for ds in datasets),
-        # Add other metadata as needed
-    }
 
 def update_policy(
     train_metrics: MetricsTracker,
@@ -227,6 +111,8 @@ def update_policy(
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
     logging.info(pformat(cfg.to_dict()))
+    # cfg.checkpoint_path = cfg.policy.pretrained_path
+    # cfg.policy.pretrained_path = cfg.policy.pretrained_path / "pretrained_model"
 
     if cfg.wandb.enable and cfg.wandb.project:
         wandb_logger = WandBLogger(cfg)
@@ -238,7 +124,7 @@ def train(cfg: TrainPipelineConfig):
         set_seed(cfg.seed)
 
     # Check device is available
-    device = get_safe_torch_device(cfg.device, log=True)
+    device = get_safe_torch_device(cfg.policy.device, log=True)
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
 
@@ -251,7 +137,7 @@ def train(cfg: TrainPipelineConfig):
     eval_env = None
     if cfg.eval_freq > 0 and cfg.env is not None:
         logging.info("Creating env")
-        eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size)
+        eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
     logging.info("Creating policy")
     # TODO: support multi-lerobot dataset
@@ -260,20 +146,17 @@ def train(cfg: TrainPipelineConfig):
         metadatas = []
         for ds in dataset._datasets:
             metadatas.append(ds.meta)
-        x = merge_lerobot_datasets_metadata(metadatas)
-        # ds_meta.stats = x["stats"]
         ds_meta.stats = dataset.stats
     else:
         ds_meta = dataset.meta
     policy = make_policy(
         cfg=cfg.policy,
-        device=device,
         ds_meta=ds_meta,
     )
 
     logging.info("Creating optimizer and scheduler")
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
-    grad_scaler = GradScaler(device, enabled=cfg.use_amp)
+    grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
 
     step = 0  # number of policy updates (forward + backward + optim)
 
@@ -310,6 +193,7 @@ def train(cfg: TrainPipelineConfig):
         batch_size=cfg.batch_size,
         shuffle=shuffle,
         sampler=sampler,
+        collate_fn=dataloader_collate_fn,
         pin_memory=device.type != "cpu",
         drop_last=False,
     )
@@ -347,7 +231,7 @@ def train(cfg: TrainPipelineConfig):
             cfg.optimizer.grad_clip_norm,
             grad_scaler=grad_scaler,
             lr_scheduler=lr_scheduler,
-            use_amp=cfg.use_amp,
+            use_amp=cfg.policy.use_amp,
         )
 
         # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
@@ -378,7 +262,10 @@ def train(cfg: TrainPipelineConfig):
         if cfg.env and is_eval_step:
             step_id = get_step_identifier(step, cfg.steps)
             logging.info(f"Eval policy at step {step}")
-            with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.use_amp else nullcontext():
+            with (
+                torch.no_grad(),
+                torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
+            ):
                 eval_info = eval_policy(
                     eval_env,
                     policy,
