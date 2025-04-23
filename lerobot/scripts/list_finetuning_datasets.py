@@ -14,10 +14,10 @@ def fetch_lerobot_datasets():
 
 def analyze_dataset_metadata(repo_id: str):
     try:
-        metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.0")
+        metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.0", force_cache_sync=True)
     except Exception as e:
         try:
-            metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.1")
+            metadata = LeRobotDatasetMetadata(repo_id=repo_id, revision="v2.1", force_cache_sync=True)
         except Exception as e:
             print(f"Error loading metadata for {repo_id}: {str(e)}")
             return None
@@ -27,6 +27,10 @@ def analyze_dataset_metadata(repo_id: str):
     if version_str not in ["2.0", "2.1"]:
         print(f"Skipping {repo_id}: version <{version_str}>")
         return None
+    
+    voc = metadata.info.get("value_order_correlation", None)
+    has_subtasks = "subtask" in metadata.features
+    has_safety_violations = "safety_violation_index" in metadata.features
         
     try:
         info = {
@@ -44,6 +48,10 @@ def analyze_dataset_metadata(repo_id: str):
             "tasks": json.dumps(metadata.tasks),  # Convert dict to JSON string
             "is_sim": "sim_" in repo_id.lower(),
             "is_eval": "eval_" in repo_id.lower(),
+            "is_dAgger": "dAgger_" in repo_id,
+            "voc": voc,
+            "has_subtasks": has_subtasks,
+            "has_safety_violations": has_safety_violations,
             "features": ','.join(metadata.features.keys()),
             "chunks_size": metadata.chunks_size,
             "total_chunks": metadata.total_chunks,

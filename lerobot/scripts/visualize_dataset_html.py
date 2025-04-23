@@ -529,7 +529,7 @@ def main():
     dataset = None
     if repo_id:
         dataset = (
-            LeRobotDataset(repo_id, root=root, tolerance_s=tolerance_s)
+            LeRobotDataset(repo_id, root=root, tolerance_s=tolerance_s, force_cache_sync=True)
             if not load_from_hf_hub
             else get_dataset_info(repo_id)
         )
