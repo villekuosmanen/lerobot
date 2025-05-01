@@ -38,6 +38,7 @@ from lerobot.common.datasets.utils import (
     DEFAULT_IMAGE_PATH,
     INFO_PATH,
     TASKS_PATH,
+    EPISODES_PATH,
     SAFETY_VIOLATIONS_PATH,
     SAFETY_VIOLATIONS_NO_VIOLATION,
     append_jsonlines,
@@ -67,6 +68,7 @@ from lerobot.common.datasets.utils import (
     write_episode_stats,
     write_info,
     write_json,
+    write_jsonlines,
     get_next_available_index,
 )
 from lerobot.common.datasets.video_utils import (
@@ -1348,6 +1350,153 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.save_modified_episode(episode_id=ep_id)
         
         return True
+    
+    def reannotate_episode_task(self, episode_id: int, new_task: str) -> bool:
+        """
+        Re-annotate the task label for a specific episode.
+        
+        This method updates the task for all frames in the specified episode.
+        
+        Args:
+            episode_id: The episode index to re-annotate
+            new_task: The new task description to assign to this episode
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Check if the episode exists
+            if episode_id not in self.meta.episodes:
+                logging.error(f"Episode {episode_id} does not exist in the dataset")
+                return False
+                
+            # Get the current task index for the episode
+            current_tasks = self.meta.episodes[episode_id]['tasks']
+            logging.info(f"Current tasks for episode {episode_id}: {current_tasks}")
+            
+            # Check if the new task already exists in the task dictionary
+            # If not, add it
+            new_task_index = self.meta.get_task_index(new_task)
+            if new_task_index is None:
+                self.meta.add_task(new_task)
+                new_task_index = self.meta.get_task_index(new_task)
+                logging.info(f"Added new task '{new_task}' with index {new_task_index}")
+            else:
+                logging.info(f"Using existing task '{new_task}' with index {new_task_index}")
+            
+            # Define a filter function to find frames in the specified episode
+            def filter_episode_frames(example):
+                return example["episode_index"] == episode_id
+            
+            # Get frames for this episode
+            episode_frames = self.hf_dataset.filter(filter_episode_frames)
+            
+            if len(episode_frames) == 0:
+                logging.warning(f"No frames found for episode {episode_id}")
+                return False
+            
+            logging.info(f"Updating task_index for {len(episode_frames)} frames")
+            
+            # Create a new task_index column with updated values
+            # First, get all current task indices
+            task_index_column = [index.item() if hasattr(index, 'item') else index 
+                                for index in self.hf_dataset["task_index"]]
+            
+            # Update the task_index for all frames in this episode
+            for i, frame in enumerate(episode_frames):
+                global_idx = frame["index"].item()
+                task_index_column[global_idx] = new_task_index
+            
+            # Update the column in the dataset
+            self.hf_dataset = self.hf_dataset.remove_columns(["task_index"])
+            self.hf_dataset = self.hf_dataset.add_column("task_index", task_index_column)
+            
+            # Update the episode metadata
+            self.meta.episodes[episode_id]['tasks'] = [new_task]
+
+            episodes = []
+            for i in range(0, self.num_episodes):
+                episodes.append(self.meta.episodes[i])
+            write_jsonlines(episodes, self.meta.root / EPISODES_PATH)
+            write_info(self.meta.info, self.root)
+
+            # Save the modified episode data
+            self.save_modified_episode(episode_id=episode_id)
+            
+            logging.info(f"Successfully re-annotated episode {episode_id} with task '{new_task}'")
+            return True
+        
+        except Exception as e:
+            logging.error(f"Error re-annotating episode task: {str(e)}")
+            return False
+        
+    def replace_task_description(self, old_task: str, new_task: str) -> bool:
+        """
+        Replace a task description with a new one across the entire dataset.
+        
+        This method:
+        1. Finds the task_index for the old task description
+        2. Updates the task description in the tasks dictionary
+        3. Updates the episodes metadata for all affected episodes
+        4. Saves the changes to disk
+        
+        Note: This method doesn't modify the task_index values in the dataset,
+        since they remain valid references to the updated task description.
+        
+        Args:
+            old_task: The existing task description to replace
+            new_task: The new task description to use instead
+            
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        try:
+            # Check if the old task exists
+            task_index = self.meta.get_task_index(old_task)
+            if task_index is None:
+                logging.error(f"Task '{old_task}' does not exist in the dataset")
+                return False
+                
+            # Check if the new task already exists (to avoid duplicates)
+            if self.meta.get_task_index(new_task) is not None:
+                logging.error(f"Task '{new_task}' already exists in the dataset. Use a unique task description.")
+                return False
+            
+            logging.info(f"Replacing task '{old_task}' (index {task_index}) with '{new_task}'")
+            
+            # Update the task description in the tasks dictionary
+            self.meta.tasks[task_index] = new_task
+            self.meta.task_to_task_index[new_task] = task_index
+            del self.meta.task_to_task_index[old_task]
+            
+            # Find affected episodes
+            affected_episodes = []
+            for ep_idx, episode in self.meta.episodes.items():
+                if old_task in episode['tasks']:
+                    affected_episodes.append(ep_idx)
+                    # Update the task name in the episodes metadata
+                    episode['tasks'] = [new_task if task == old_task else task for task in episode['tasks']]
+            
+            if not affected_episodes:
+                logging.warning(f"No episodes found with task '{old_task}'")
+                return False
+            
+            logging.info(f"Found {len(affected_episodes)} episodes using this task")
+            
+            # Rewrite the json files
+            tasks = [{"task_index": task_idx, "task": task} for task_idx, task in self.meta.tasks.items()]
+            write_jsonlines(tasks, self.meta.root / TASKS_PATH)
+            episodes = []
+            for i in range(0, self.num_episodes):
+                episodes.append(self.meta.episodes[i])
+            write_jsonlines(episodes, self.meta.root / EPISODES_PATH)
+                
+            logging.info(f"Successfully replaced task '{old_task}' with '{new_task}' across {len(affected_episodes)} episodes")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error replacing task description: {str(e)}")
+            return False
 
     @classmethod
     def create(
