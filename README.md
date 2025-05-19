@@ -402,16 +402,16 @@ Additionally, if you are using any of the particular policy architecture, pretra
 
 ## Cloud installation
 
-# Update system packages
+### Update system packages
 sudo apt-get update && sudo apt-get upgrade -y
 
-# Install git and other essential tools
+### Install git and other essential tools
 sudo apt install -y git wget htop tmux
 
-# Install Mamba (Mambaforge)
+### Install Mamba (Mambaforge)
 wget https://github.com/conda-forge/miniforge/releases/download/25.1.1-0/Miniforge3-25.1.1-0-Linux-x86_64.sh
 bash Miniforge3-25.1.1-0-Linux-x86_64.sh
-# now exit and re-enter the VM
+### now exit and re-enter the VM
 
 ~/miniforge3/bin/mamba create -n lerobot python=3.10 -y
 mamba activate lerobot
@@ -424,18 +424,41 @@ pip install pytest
 pip install -e ".[pi0]"
 
 
-# login wandb and huggingface-cli
+### login wandb and huggingface-cli
 
 wandb login
 huggingface-cli login
 
-# Use tmux to run a command
+### Use tmux to run a command
 tmux new -s debug_session
 
 ```
 PYTHONPATH=/home/ubuntu/lerobot:$PYTHONPATH /home/ubuntu/miniforge3/envs/lerobot/bin/python lerobot/scripts/train.py --dataset.repo_id=[villekuosmanen/stack_pepsi_cans,villekuosmanen/fold_teat_towel_desk,villekuosmanen/insert_paper_towel,villekuosmanen/manipulate_glasses,villekuosmanen/measure_cat_food,villekuosmanen/open_close_zipper_bags,villekuosmanen/pack_backpack,villekuosmanen/pack_easter_eggs_into_basket,villekuosmanen/pack_electric_toothbrush,villekuosmanen/pack_toothbrush,villekuosmanen/pair_up_socks,villekuosmanen/sort_coloured_pins,villekuosmanen/dAgger_pack_easter_eggs_into_basket_2.0.1] --policy.path=lerobot/pi0 --output_dir=outputs/train/pi0_general_1.0 --job_name=pi0_general_1.0 --policy.device=cuda --batch_size=24 --eval_freq=-1 --log_freq=20 --save_freq=2000 --steps=80000 --wandb.enable=true
 ```
 
-# Download checkpoints
+### Download checkpoints
 
 scp -r username@remote_server:/path/to/remote/directory /local/destination
+
+## when not pre-installing cuda 
+
+#!/bin/bash
+
+sudo apt update && 
+
+### Install Nvidia Cuda Toolkit 12.5 
+
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/x86_64/cuda-keyring_1.1-1_all.deb && 
+sudo dpkg -i cuda-keyring_1.1-1_all.deb && 
+sudo apt-get update && 
+sudo apt-get -y install cuda-toolkit-12-5 && 
+sudo apt-get install -y nvidia-driver-555-open && 
+sudo apt-get install -y cuda-drivers-555 && 
+echo "blacklist nvidia_uvm" | sudo tee /etc/modprobe.d/nvlink-denylist.conf && 
+echo "options nvidia NVreg_NvLinkDisable=1" | sudo tee /etc/modprobe.d/disable-nvlink.conf && 
+sudo update-initramfs -u && 
+
+### Install PyTorch 
+
+sudo apt install -y python3-pip && pip3 install torch torchvision torchaudio && export PATH="/home/ubuntu/.local/bin:$PATH" && 
+sudo reboot
