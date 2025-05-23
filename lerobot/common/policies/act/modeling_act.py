@@ -114,7 +114,7 @@ class ACTPolicy(PreTrainedPolicy):
             self._eoe_queue = deque([], maxlen=self.config.n_action_steps)
 
     @torch.no_grad
-    def select_action(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+    def select_action(self,batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor]:
         """Select a single action given environment observations.
 
         This method wraps `select_actions` in order to return one action at a time for execution in the
@@ -152,6 +152,9 @@ class ACTPolicy(PreTrainedPolicy):
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             self._action_queue.extend(actions.transpose(0, 1))
             self._eoe_queue.extend(eoe_preds.transpose(0, 1))
+        elif force_model_run:
+            # predict and throw away:
+            _, _, _ = self.model(batch)
         return self._action_queue.popleft(), self._eoe_queue.popleft()
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
