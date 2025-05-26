@@ -16,8 +16,11 @@
 import contextlib
 import logging
 import shutil
+import tempfile
+import time
+from copy import deepcopy
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import datasets
 import numpy as np
@@ -41,6 +44,7 @@ from lerobot.common.datasets.utils import (
     EPISODES_PATH,
     SAFETY_VIOLATIONS_PATH,
     SAFETY_VIOLATIONS_NO_VIOLATION,
+    GAZE_ANNOTATIONS_PATH,
     append_jsonlines,
     backward_compatible_episodes_stats,
     check_delta_timestamps,
@@ -61,6 +65,7 @@ from lerobot.common.datasets.utils import (
     load_info,
     load_stats,
     load_tasks,
+    load_json,
     load_safety_violations,
     validate_episode_buffer,
     validate_frame,
@@ -78,7 +83,7 @@ from lerobot.common.datasets.video_utils import (
     get_safe_default_codec,
     get_video_info,
 )
-from lerobot.common.robot_devices.robots.utils import Robot
+# from lerobot.common.robot_devices.robots.utils import Robot
 
 CODEBASE_VERSION = "v2.1"
 
@@ -115,12 +120,38 @@ class LeRobotDatasetMetadata:
         # load safety violations
         self.load_safety_violations()
         
+        # load gaze annotations
+        self.load_gaze_annotations()
+        
         if self._version < packaging.version.parse("v2.1"):
             self.stats = load_stats(self.root)
             self.episodes_stats = backward_compatible_episodes_stats(self.stats, self.episodes)
         else:
             self.episodes_stats = load_episodes_stats(self.root)
             self.stats = aggregate_stats(list(self.episodes_stats.values()))
+
+    def load_gaze_annotations(self):
+        """Load gaze annotations from the metadata file.
+        
+        The gaze annotations are stored as a nested dictionary:
+        {
+            episode_id: {
+                frame_index: {
+                    camera_key: {
+                        x: float,
+                        y: float,
+                    }
+                }
+            }
+        }
+        """
+        try:
+            self.gaze_annotations = load_json(self.root / GAZE_ANNOTATIONS_PATH)
+            logging.info("gaze annotations imported")
+        except Exception:
+            # Initialize empty structure if file doesn't exist
+            logging.warning("no gaze annotations found")
+            pass
 
     def pull_from_repo(
         self,
@@ -338,7 +369,7 @@ class LeRobotDatasetMetadata:
         repo_id: str,
         fps: int,
         root: str | Path | None = None,
-        robot: Robot | None = None,
+        robot: Any | None = None,
         robot_type: str | None = None,
         features: dict | None = None,
         use_videos: bool = True,
@@ -346,7 +377,7 @@ class LeRobotDatasetMetadata:
         """Creates metadata for a LeRobotDataset."""
         obj = cls.__new__(cls)
         obj.repo_id = repo_id
-        obj.root = Path(root) if root is not None else HF_LEROBOT_HOME / repo_id
+        obj.root = Path(root) if root is not None else HF_LEROBOT_HOME
 
         obj.root.mkdir(parents=True, exist_ok=False)
 
@@ -799,6 +830,18 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Add task as a string
         task_idx = item["task_index"].item()
         item["task"] = self.meta.tasks[task_idx]
+        
+        # Add gaze annotations if they exist for this frame
+        ep_idx = item['episode_index'].item()
+        frame_idx = item['frame_index'].item()
+        
+        if hasattr(self.meta, 'gaze_annotations') and str(ep_idx) in self.meta.gaze_annotations:
+            if str(frame_idx) in self.meta.gaze_annotations[str(ep_idx)]:
+                item['gaze_annotations'] = self.meta.gaze_annotations[str(ep_idx)][str(frame_idx)]
+            else:
+                item['gaze_annotations'] = {}
+        else:
+            item['gaze_annotations'] = {}
 
         return item
 
@@ -917,7 +960,6 @@ class LeRobotDataset(torch.utils.data.Dataset):
     ) -> None:
         """
         This will save to disk the current episode in self.episode_buffer.
-
         Args:
             episode_data (dict | None, optional): Dict containing the episode data to save. If None, this will
                 save the current episode in self.episode_buffer, which is filled with 'add_frame'. Defaults to
@@ -1006,25 +1048,25 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         # Group by episode_index
         episode_indices = set(torch.stack(self.hf_dataset["episode_index"]).numpy())
-        
+
         for ep_idx in episode_indices:
             # Filter dataset for the current episode
             def filter_func(example):
                 return example["episode_index"] == ep_idx
-            
+
             ep_dataset = self.hf_dataset.filter(filter_func)
-            
+
             # Convert to format expected by to_parquet
             ep_dataset.set_format(None)  # Reset format if any was set
-            
+
             # Get the path for this episode's parquet file
             ep_data_path = self.root / self.meta.get_data_file_path(ep_index=ep_idx)
             ep_data_path.parent.mkdir(parents=True, exist_ok=True)
-            
+
             # Save to parquet
             print(f"Saving modified data for episode {ep_idx} to {ep_data_path}")
             ep_dataset.to_parquet(ep_data_path)
-        
+
         # Save updated metadata
         write_info(self.meta.info, self.meta.root)
 
@@ -1036,16 +1078,16 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Filter dataset for the current episode
         def filter_func(example):
             return example["episode_index"] == episode_id
-        
+
         ep_dataset = self.hf_dataset.filter(filter_func)
-        
+
         # Convert to format expected by to_parquet
         ep_dataset.set_format(None)  # Reset format if any was set
-        
+
         # Get the path for this episode's parquet file
         ep_data_path = self.root / self.meta.get_data_file_path(ep_index=episode_id)
         ep_data_path.parent.mkdir(parents=True, exist_ok=True)
-        
+
         # Save to parquet
         print(f"Saving modified data for episode {episode_id} to {ep_data_path}")
         ep_dataset.to_parquet(ep_data_path)
@@ -1117,6 +1159,61 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         return video_paths
     
+    def add_gaze_annotations(self, annotations: dict) -> bool:
+        """Add gaze annotations for multiple episodes and frames.
+        
+        This method stores gaze annotations in the metadata file rather than in the parquet files.
+        The annotations are stored in a json file under meta/gaze_annotations.json.
+        
+        Args:
+            annotations: Dictionary containing gaze annotations with structure:
+                {
+                    episode_id: {
+                        frame_index: {
+                            camera_key: {
+                                x: float,
+                                y: float
+                            }
+                        }
+                    }
+                }
+                
+        Returns:
+            bool: True if successful, False otherwise
+        """
+        if not hasattr(self.meta, 'gaze_annotations'):
+            self.meta.gaze_annotations = {}
+
+        try:
+            # Validate all episodes and frames exist
+            for episode_id, frames in annotations.items():
+                if episode_id not in self.meta.episodes:
+                    logging.error(f"Episode {episode_id} does not exist in the dataset")
+                    return False
+                    
+                episode_length = self.meta.episodes[episode_id]['length']
+                for frame_index in frames.keys():
+                    if frame_index >= episode_length:
+                        logging.error(f"Frame index {frame_index} is out of bounds for episode {episode_id} (length: {episode_length})")
+                        return False
+                
+                # Initialize episode dict if needed
+                if episode_id not in self.meta.gaze_annotations:
+                    self.meta.gaze_annotations[episode_id] = {}
+                
+                # Update annotations for this episode
+                self.meta.gaze_annotations[episode_id].update(frames)
+            
+            # Write all annotations to disk
+            write_json(self.meta.gaze_annotations, self.root / GAZE_ANNOTATIONS_PATH)
+            
+            logging.info(f"Successfully added gaze annotations for {len(annotations)} episodes")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error adding gaze annotations: {str(e)}")
+            return False
+
     def add_safety_violation(
         self,
         violation_description: str,
@@ -1144,27 +1241,27 @@ class LeRobotDataset(torch.utils.data.Dataset):
         violation_index = get_next_available_index(self.meta.safety_violations)
 
         self.meta.safety_violations[violation_index] = violation_description
-        
+
         # Save to jsonl file
         safety_violation_dict = {
             "violation_index": violation_index,
             "violation": violation_description,
         }
-        
+
         # Create the safety_violations.jsonl file if it doesn't exist
         violations_path = self.root / SAFETY_VIOLATIONS_PATH
         violations_path.parent.mkdir(exist_ok=True, parents=True)
         append_jsonlines(safety_violation_dict, violations_path)
-        
+
         # Update info file with the new violation metadata
         if "total_safety_violations" not in self.meta.info:
             self.meta.info["total_safety_violations"] = 1
         else:
             self.meta.info["total_safety_violations"] += 1
-            
+
         # Write updated info to disk
         write_json(self.meta.info, self.root / "meta/info.json")
-            
+
         # Apply the violation to the specified frames
         self.apply_safety_violation_to_frames(
             violation_index, 
@@ -1172,7 +1269,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             start_frame_index,
             end_frame_index
         )
-        
+
         return violation_index
 
     def apply_safety_violation_to_frames(
@@ -1193,36 +1290,36 @@ class LeRobotDataset(torch.utils.data.Dataset):
         """
         # Check if the safety_violation_index column exists in the dataset
         column_exists = "safety_violation_index" in self.hf_dataset.features
-        
+
         # Define a filter function to find frames in the specified range
         def filter_violation_frames(example):
             episode_match = example["episode_index"] == episode_id
             frame_range = (example["frame_index"] >= start_frame_index) & (example["frame_index"] < end_frame_index)
             return episode_match & frame_range
-        
+
         # Get frames to apply the violation to
         frames_with_violation = self.hf_dataset.filter(filter_violation_frames)
-        
+
         if len(frames_with_violation) == 0:
             print(f"Warning: No frames found in episode {episode_id} with frame indices {start_frame_index}-{end_frame_index}")
             return
-        
+
         # Extract global indices for these frames
         global_indices = [frame["index"].item() for frame in frames_with_violation]
-        
+
         # If column doesn't exist, we need to add it to the whole dataset with default values
         if not column_exists:
             # Create a new column filled with the default NO_VIOLATION value
             safety_violation_column = [SAFETY_VIOLATIONS_NO_VIOLATION] * len(self.hf_dataset)
-                        
+
             # Update the values for frames with violations
             for idx in global_indices:
                 safety_violation_column[idx] = violation_index
-            
+
             # Add the column to the dataset
             print("Adding 'safety_violation_index' column to dataset")
             self.hf_dataset = self.hf_dataset.add_column("safety_violation_index", safety_violation_column)
-            
+
             # Update dataset features metadata
             self.meta.info["features"]["safety_violation_index"] = {
                 "dtype": "int64",
@@ -1232,14 +1329,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.save_modified_dataset() 
         else:
             # If the column already exists, create a new dataset with updated values
-            
+
             # First, get the current safety violation indices
             safety_violation_column = [index.item() if hasattr(index, 'item') else index for index in self.hf_dataset["safety_violation_index"]]
-                        
+
             # Update the values for frames with violations
             for idx in global_indices:
                 safety_violation_column[idx] = violation_index
-            
+
             # Update the column in the dataset
             print("Updating 'safety_violation_index' column in dataset")
             self.hf_dataset = self.hf_dataset.remove_columns(["safety_violation_index"])
@@ -1258,7 +1355,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         Args:
             violation_index: Index of the safety violation to delete
             episode_id: episode index to limit scope of frame updates
-                
+
         Returns:
             bool: True if the violation was found and deleted, False otherwise
         """
@@ -1266,29 +1363,29 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if not hasattr(self.meta, 'safety_violations') or violation_index not in self.meta.safety_violations:
             print(f"Warning: Safety violation with index {violation_index} not found")
             return False
-        
+
         # Get the violation description (for logging purposes)
         violation_description = self.meta.safety_violations.get(violation_index)
-        
+
         # Remove from metadata
         del self.meta.safety_violations[violation_index]
-        
+
         # Update info file to decrement the total count
         if "total_safety_violations" in self.meta.info:
             self.meta.info["total_safety_violations"] = max(0, self.meta.info["total_safety_violations"] - 1)
             write_json(self.meta.info, self.root / "meta/info.json")
-        
+
         # Also update the JSONL file by rewriting it
         violations_path = self.root / SAFETY_VIOLATIONS_PATH
         if violations_path.exists():
             # Back up the original file
             temp_path = violations_path.with_suffix('.jsonl.bak')
             shutil.copy(violations_path, temp_path)
-            
+
             try:
                 # Delete the original file
                 violations_path.unlink()
-                
+
                 # Rewrite with all violations except the deleted one
                 for idx, desc in self.meta.safety_violations.items():
                     safety_violation_dict = {
@@ -1296,7 +1393,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                         "violation": desc,
                     }
                     append_jsonlines(safety_violation_dict, violations_path)
-                
+
                 # If successful, remove the backup
                 temp_path.unlink()
             except Exception as e:
@@ -1306,51 +1403,51 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 if temp_path.exists():
                     temp_path.unlink()
                 raise e
-        
+
         # Check if safety_violation_index column exists in the dataset
         if "safety_violation_index" not in self.hf_dataset.features:
             return True  # Nothing to update in the dataset
-        
+
         # Only look for frames in the specified episode
         def filter_violation_frames(example):
             episode_match = example["episode_index"] == episode_id
             has_violation = example["safety_violation_index"] == violation_index
             return episode_match & has_violation
-        
+
         # Get frames that have this violation
         frames_with_violation = self.hf_dataset.filter(filter_violation_frames)
-        
+
         if len(frames_with_violation) == 0:
             print(f"No frames found with safety violation index {violation_index}")
             return True
-        
+
         print(f"Updating {len(frames_with_violation)} frames to remove safety violation '{violation_description}'")
-        
+
         # Get all indices for affected frames
         affected_indices = [frame["index"].item() for frame in frames_with_violation]
-        
+
         # Get all affected episodes for selective saving
         affected_episodes = set([frame["episode_index"].item() for frame in frames_with_violation])
-        
+
         # First, get the current safety violation indices
         safety_violation_column = [index.item() if hasattr(index, 'item') else index 
                                 for index in self.hf_dataset["safety_violation_index"]]
-        
+
         # Update the values for affected frames to NO_VIOLATION
         for idx in affected_indices:
             safety_violation_column[idx] = SAFETY_VIOLATIONS_NO_VIOLATION
-        
+
         # Update the column in the dataset
         print("Updating 'safety_violation_index' column in dataset")
         self.hf_dataset = self.hf_dataset.remove_columns(["safety_violation_index"])
         self.hf_dataset = self.hf_dataset.add_column("safety_violation_index", safety_violation_column)
-        
+
         # Save only the affected episodes for efficiency
         for ep_id in affected_episodes:
             self.save_modified_episode(episode_id=ep_id)
-        
+
         return True
-    
+
     def reannotate_episode_task(self, episode_id: int, new_task: str) -> bool:
         """
         Re-annotate the task label for a specific episode.
@@ -1369,11 +1466,11 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if episode_id not in self.meta.episodes:
                 logging.error(f"Episode {episode_id} does not exist in the dataset")
                 return False
-                
+
             # Get the current task index for the episode
             current_tasks = self.meta.episodes[episode_id]['tasks']
             logging.info(f"Current tasks for episode {episode_id}: {current_tasks}")
-            
+
             # Check if the new task already exists in the task dictionary
             # If not, add it
             new_task_index = self.meta.get_task_index(new_task)
@@ -1383,34 +1480,34 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 logging.info(f"Added new task '{new_task}' with index {new_task_index}")
             else:
                 logging.info(f"Using existing task '{new_task}' with index {new_task_index}")
-            
+
             # Define a filter function to find frames in the specified episode
             def filter_episode_frames(example):
                 return example["episode_index"] == episode_id
-            
+
             # Get frames for this episode
             episode_frames = self.hf_dataset.filter(filter_episode_frames)
-            
+
             if len(episode_frames) == 0:
                 logging.warning(f"No frames found for episode {episode_id}")
                 return False
-            
+
             logging.info(f"Updating task_index for {len(episode_frames)} frames")
-            
+
             # Create a new task_index column with updated values
             # First, get all current task indices
             task_index_column = [index.item() if hasattr(index, 'item') else index 
                                 for index in self.hf_dataset["task_index"]]
-            
+
             # Update the task_index for all frames in this episode
             for i, frame in enumerate(episode_frames):
                 global_idx = frame["index"].item()
                 task_index_column[global_idx] = new_task_index
-            
+
             # Update the column in the dataset
             self.hf_dataset = self.hf_dataset.remove_columns(["task_index"])
             self.hf_dataset = self.hf_dataset.add_column("task_index", task_index_column)
-            
+
             # Update the episode metadata
             self.meta.episodes[episode_id]['tasks'] = [new_task]
 
@@ -1422,14 +1519,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
             # Save the modified episode data
             self.save_modified_episode(episode_id=episode_id)
-            
+
             logging.info(f"Successfully re-annotated episode {episode_id} with task '{new_task}'")
             return True
-        
+
         except Exception as e:
             logging.error(f"Error re-annotating episode task: {str(e)}")
             return False
-        
+
     def replace_task_description(self, old_task: str, new_task: str) -> bool:
         """
         Replace a task description with a new one across the entire dataset.
@@ -1456,19 +1553,19 @@ class LeRobotDataset(torch.utils.data.Dataset):
             if task_index is None:
                 logging.error(f"Task '{old_task}' does not exist in the dataset")
                 return False
-                
+
             # Check if the new task already exists (to avoid duplicates)
             if self.meta.get_task_index(new_task) is not None:
                 logging.error(f"Task '{new_task}' already exists in the dataset. Use a unique task description.")
                 return False
-            
+
             logging.info(f"Replacing task '{old_task}' (index {task_index}) with '{new_task}'")
-            
+
             # Update the task description in the tasks dictionary
             self.meta.tasks[task_index] = new_task
             self.meta.task_to_task_index[new_task] = task_index
             del self.meta.task_to_task_index[old_task]
-            
+
             # Find affected episodes
             affected_episodes = []
             for ep_idx, episode in self.meta.episodes.items():
@@ -1476,13 +1573,13 @@ class LeRobotDataset(torch.utils.data.Dataset):
                     affected_episodes.append(ep_idx)
                     # Update the task name in the episodes metadata
                     episode['tasks'] = [new_task if task == old_task else task for task in episode['tasks']]
-            
+
             if not affected_episodes:
                 logging.warning(f"No episodes found with task '{old_task}'")
                 return False
-            
+
             logging.info(f"Found {len(affected_episodes)} episodes using this task")
-            
+
             # Rewrite the json files
             tasks = [{"task_index": task_idx, "task": task} for task_idx, task in self.meta.tasks.items()]
             write_jsonlines(tasks, self.meta.root / TASKS_PATH)
@@ -1490,13 +1587,293 @@ class LeRobotDataset(torch.utils.data.Dataset):
             for i in range(0, self.num_episodes):
                 episodes.append(self.meta.episodes[i])
             write_jsonlines(episodes, self.meta.root / EPISODES_PATH)
-                
+
             logging.info(f"Successfully replaced task '{old_task}' with '{new_task}' across {len(affected_episodes)} episodes")
             return True
-            
+
         except Exception as e:
             logging.error(f"Error replacing task description: {str(e)}")
             return False
+
+    def _filter_and_reindex_frames(self, operations_by_episode):
+        """
+        Filter out frames marked for deletion and reindex remaining frames.
+        
+        Args:
+            operations_by_episode: Dictionary mapping episode indices to lists of (start_frame, end_frame) ranges to delete
+            
+        Returns:
+            New HF dataset with frames removed and indices updated
+        """
+        # Create a function to track global indices and perform filtering
+        def create_filter_and_reindex_fn():
+            # We use closures to maintain state across batches
+            current_global_idx = 0
+            # Track frame indices and timestamps for each episode
+            ep_frame_counters = {}
+            frames_removed_per_episode = {}
+            # Store the timestamp offset for each episode (first kept frame's original timestamp)
+            ep_timestamp_offsets = {}
+            
+            def filter_and_reindex_fn(batch, indices):
+                nonlocal current_global_idx
+                
+                new_batch = {k: [] for k in batch}
+                # Add original_timestamp directly to the batch
+                new_batch["original_timestamp"] = []
+                
+                for i, (ep_idx, frame_idx) in enumerate(zip(batch["episode_index"], batch["frame_index"])):
+                    ep_idx = ep_idx.item()
+                    frame_idx = frame_idx.item()
+                    timestamp = batch["timestamp"][i].item()
+                    
+                    # Initialize counters for this episode if not yet seen
+                    if ep_idx not in ep_frame_counters:
+                        ep_frame_counters[ep_idx] = 0
+                        frames_removed_per_episode[ep_idx] = 0
+                        ep_timestamp_offsets[ep_idx] = None  # Will be set with first kept frame
+                    
+                    # Check if this frame should be deleted
+                    should_delete = False
+                    if ep_idx in operations_by_episode:
+                        for start_frame, end_frame in operations_by_episode[ep_idx]:
+                            if start_frame <= frame_idx <= end_frame:
+                                should_delete = True
+                                frames_removed_per_episode[ep_idx] += 1
+                                break
+                    
+                    if not should_delete:
+                        # Keep this frame and update indices
+                        for k in batch:
+                            new_batch[k].append(batch[k][i])
+                        
+                        # Store the original timestamp directly in the batch
+                        new_batch["original_timestamp"].append(timestamp)
+                        
+                        # Update the frame index to be continuous within the episode
+                        new_frame_idx = ep_frame_counters[ep_idx]
+                        new_batch["frame_index"][-1] = new_frame_idx
+                        
+                        # Update the timestamp to preserve relative timing
+                        # For the first frame we keep in an episode, set the timestamp offset
+                        if ep_timestamp_offsets[ep_idx] is None:
+                            ep_timestamp_offsets[ep_idx] = timestamp
+                        
+                        # Adjust the timestamp relative to the first kept frame
+                        new_timestamp = timestamp - ep_timestamp_offsets[ep_idx]
+                        new_batch["timestamp"][-1] = new_timestamp
+                        
+                        # Update global index
+                        new_batch["index"][-1] = current_global_idx
+                        
+                        # Increment counters
+                        ep_frame_counters[ep_idx] += 1
+                        current_global_idx += 1
+                
+                return new_batch
+            
+            return filter_and_reindex_fn
+        
+        # Filter and reindex frames, including original_timestamp in the batch
+        filtered_dataset = self.hf_dataset.map(
+            function=create_filter_and_reindex_fn(),
+            batched=True,
+            with_indices=True,
+        )
+        
+        return filtered_dataset
+
+    def _write_updated_dataset_with_deleted_frames(self, new_hf_dataset, new_meta, operations_by_episode, temp_root):
+        """
+        Write the updated dataset files to a temporary directory and re-encode videos for affected episodes.
+        """
+        # Create the directory structure
+        (temp_root / "meta").mkdir(parents=True, exist_ok=True)
+        (temp_root / "data").mkdir(parents=True, exist_ok=True)
+        if self.meta.video_keys:
+            (temp_root / "videos").mkdir(parents=True, exist_ok=True)
+            (temp_root / "images").mkdir(parents=True, exist_ok=True)
+        
+        # Write the updated metadata
+        write_info(new_meta.info, temp_root)
+        
+        # Write episodes metadata
+        for ep_idx, ep_data in new_meta.episodes.items():
+            write_episode(ep_data, temp_root)
+        
+        # Write tasks metadata
+        for task_idx, task in new_meta.tasks.items():
+            task_dict = {
+                "task_index": task_idx,
+                "task": task,
+            }
+            append_jsonlines(task_dict, temp_root / TASKS_PATH)
+        
+        # Process each episode
+        for ep_idx in range(new_meta.total_episodes):
+            chunk = new_meta.get_episode_chunk(ep_idx)
+            (temp_root / "data" / f"chunk-{chunk:03d}").mkdir(parents=True, exist_ok=True)
+            
+            # Filter this episode's frames
+            ep_frames = new_hf_dataset.filter(lambda x: x["episode_index"] == ep_idx)
+            
+            if len(ep_frames) > 0:
+                # Save the episode data to parquet without the original_timestamp column
+                ep_data_path = temp_root / f"data/chunk-{chunk:03d}/episode_{ep_idx:06d}.parquet"
+                
+                # Remove the original_timestamp column - much simpler now
+                ep_dataset = ep_frames.remove_columns(["original_timestamp"])
+                
+                # Embed images in the dataset
+                ep_dataset = embed_images(ep_dataset)
+                ep_dataset.set_transform(hf_transform_to_torch)
+                ep_dataset.to_parquet(ep_data_path)
+                
+                # If this episode was affected and has videos, re-encode the videos
+                if ep_idx in operations_by_episode and self.meta.video_keys:
+                    for vid_key in self.meta.video_keys:
+                        # Create directory for video
+                        new_video_dir = temp_root / f"videos/chunk-{chunk:03d}/{vid_key}"
+                        new_video_dir.mkdir(parents=True, exist_ok=True)
+                        new_video_path = new_video_dir / f"episode_{ep_idx:06d}.mp4"
+                        
+                        # Create temporary directory for frames
+                        frames_dir = temp_root / "images" / f"episode_{ep_idx:06d}_{vid_key}"
+                        frames_dir.mkdir(parents=True, exist_ok=True)
+                        
+                        # Extract frames for this video using the original timestamps
+                        self._extract_frames_for_reencoding(ep_frames, vid_key, frames_dir)
+                        
+                        # Re-encode video
+                        encode_video_frames(
+                            imgs_dir=frames_dir,
+                            video_path=new_video_path,
+                            fps=self.meta.fps,
+                            overwrite=True,
+                        )
+                else:
+                    # Copy the original video files for unaffected episodes
+                    if self.meta.video_keys:
+                        for vid_key in self.meta.video_keys:
+                            old_video_path = self.root / self.meta.get_video_file_path(ep_idx, vid_key)
+                            if old_video_path.exists():
+                                new_video_dir = temp_root / f"videos/chunk-{chunk:03d}/{vid_key}"
+                                new_video_dir.mkdir(parents=True, exist_ok=True)
+                                new_video_path = new_video_dir / f"episode_{ep_idx:06d}.mp4"
+                                shutil.copy2(old_video_path, new_video_path)
+        
+        # Recalculate episode stats
+        for ep_idx in new_meta.episodes:
+            ep_frames = new_hf_dataset.filter(lambda x: x["episode_index"] == ep_idx)
+            if len(ep_frames) > 0:
+                # Remove original_timestamp column for stats calculation
+                ep_frames_filtered = ep_frames.remove_columns(["original_timestamp"])
+                
+                # Convert to dict for stats calculation - properly handling types
+                ep_dict = {}
+                for k in ep_frames_filtered.column_names:
+                    if k not in self.features:
+                        # Skip keys not in features (like index)
+                        continue
+                        
+                    if self.features[k]["dtype"] in ["string", "list"]:
+                        # Keep strings as lists
+                        ep_dict[k] = list(ep_frames_filtered[k])
+                    elif self.features[k]["dtype"] in ["image", "video"]:
+                        # Keep image paths as lists
+                        ep_dict[k] = list(ep_frames_filtered[k])
+                    else:
+                        # Convert numeric data to numpy arrays
+                        ep_dict[k] = np.stack(ep_frames_filtered[k])
+                
+                ep_stats = compute_episode_stats(ep_dict, self.features)
+                write_episode_stats(ep_idx, ep_stats, temp_root)
+                new_meta.episodes_stats[ep_idx] = ep_stats
+        
+        # Update aggregate stats
+        new_meta.stats = aggregate_stats(list(new_meta.episodes_stats.values()))
+
+    def _extract_frames_for_reencoding(self, ep_frames, vid_key, frames_dir):
+        """
+        Extract frames from a dataset and save them as images for video re-encoding.
+        
+        Optimized to batch decode frames from videos.
+        """
+        if vid_key in self.meta.video_keys:
+            # For video-based datasets, batch extract all frames
+            # First, collect all timestamps and episode indices
+            all_timestamps = []
+            episode_index = None
+            
+            # Just get the episode index from the first frame since they all have the same episode
+            for frame_data in ep_frames:
+                if episode_index is None:
+                    episode_index = frame_data["episode_index"].item()
+                all_timestamps.append(frame_data["original_timestamp"].item())
+            
+            # Get the video path
+            video_path = self.root / self.meta.get_video_file_path(episode_index, vid_key)
+            
+            # Decode all frames at once
+            frames_tensor = decode_video_frames(
+                video_path,
+                all_timestamps,
+                self.tolerance_s,
+                self.video_backend
+            )
+            
+            # Save all frames
+            for i, frame_tensor in enumerate(frames_tensor):
+                frame_numpy = (frame_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                frame_image = PIL.Image.fromarray(frame_numpy)
+                frame_image.save(frames_dir / f"frame_{i:06d}.png")
+        else:
+            # For image-based datasets, we still need to process one by one
+            for i, frame_data in enumerate(ep_frames):
+                frame_tensor = frame_data[vid_key]
+                frame_numpy = (frame_tensor.permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+                frame_image = PIL.Image.fromarray(frame_numpy)
+                frame_image.save(frames_dir / f"frame_{i:06d}.png")
+
+    def _replace_dataset_folder(self, target_dir, source_dir, backup):
+        """
+        Replace the dataset directory with a new one, optionally creating a backup.
+        """
+        if target_dir.exists():
+            if backup:
+                backup_path = (
+                    Path(backup)
+                    if isinstance(backup, (str, Path))
+                    else target_dir.parent / f"{target_dir.name}_backup_{int(time.time())}"
+                )
+                
+                if backup_path.resolve() == target_dir.resolve() or backup_path.resolve().is_relative_to(
+                    target_dir.resolve()
+                ):
+                    raise ValueError(
+                        f"Backup directory '{backup_path}' cannot be inside the dataset "
+                        f"directory '{target_dir}' as this would cause infinite recursion"
+                    )
+                
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                logging.info(f"Creating backup at: {backup_path}")
+                shutil.copytree(target_dir, backup_path)
+            
+            # Remove the target directory's contents
+            for item in target_dir.glob("*"):
+                if item.is_dir():
+                    shutil.rmtree(item)
+                else:
+                    item.unlink()
+        else:
+            target_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Replace the contents of the target directory with the contents of the source directory
+        for item in source_dir.glob("*"):
+            if item.is_dir():
+                shutil.copytree(item, target_dir / item.name, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, target_dir / item.name)
 
     @classmethod
     def create(
@@ -1504,7 +1881,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         repo_id: str,
         fps: int,
         root: str | Path | None = None,
-        robot: Robot | None = None,
+        robot: Any | None = None,
         robot_type: str | None = None,
         features: dict | None = None,
         use_videos: bool = True,
@@ -1544,6 +1921,120 @@ class LeRobotDataset(torch.utils.data.Dataset):
         obj.episode_data_index = None
         obj.video_backend = video_backend if video_backend is not None else get_safe_default_codec()
         return obj
+
+    def delete_frames(
+        self,
+        deletion_operations: list[dict],
+        backup: str | Path | bool = False,
+    ) -> "LeRobotDataset":
+        """
+        Deletes specified frames from the dataset and updates all metadata and videos accordingly.
+        
+        Args:
+            deletion_operations: List of operation dictionaries with fields:
+                - episode_id: Episode index
+                - start_frame: Starting frame index (inclusive)
+                - end_frame: Ending frame index (inclusive)
+            backup: Controls backup behavior:
+                   - False: No backup is created
+                   - True: Create backup at default location next to dataset
+                   - str/Path: Create backup at the specified location
+        
+        Returns:
+            Updated LeRobotDataset with specified frames removed
+        """
+        print("Deleting frames...")
+        if not deletion_operations:
+            return self
+            
+        # Group operations by episode for more efficient processing
+        operations_by_episode = {}
+        for op in deletion_operations:
+            ep_idx = op["episode_id"]
+            if ep_idx not in operations_by_episode:
+                operations_by_episode[ep_idx] = []
+            operations_by_episode[ep_idx].append((op["start_frame"], op["end_frame"]))
+            
+        # Validate that all episode indices are valid
+        if not all(0 <= ep_idx < self.meta.total_episodes for ep_idx in operations_by_episode.keys()):
+            raise ValueError("One or more episode indices are invalid")
+            
+        # Calculate the total number of frames to be removed
+        total_frames_to_remove = 0
+        for ep_idx, ranges in operations_by_episode.items():
+            for start_frame, end_frame in ranges:
+                total_frames_to_remove += (end_frame - start_frame + 1)
+                
+        # Step 1: Filter out frames from hf_dataset and reindex
+        new_hf_dataset = self._filter_and_reindex_frames(operations_by_episode)
+        
+        # Step 2: Update metadata
+        new_meta = deepcopy(self.meta)
+        new_meta.info["total_frames"] = len(new_hf_dataset)
+        
+        # Update episode lengths and metadata
+        new_episodes = {}
+        new_episodes_stats = {}
+        
+        for ep_idx in range(self.meta.total_episodes):
+            if ep_idx in operations_by_episode:
+                # This episode had frames removed
+                # Get the new length by filtering the dataset
+                ep_frames = new_hf_dataset.filter(lambda x: x["episode_index"] == ep_idx)
+                new_length = len(ep_frames)
+                
+                # Update episode metadata
+                ep_data = deepcopy(self.meta.episodes[ep_idx])
+                ep_data["length"] = new_length
+                new_episodes[ep_idx] = ep_data
+                
+                # We'll recalculate episode stats later
+            else:
+                # This episode is unchanged
+                new_episodes[ep_idx] = deepcopy(self.meta.episodes[ep_idx])
+                if ep_idx in self.meta.episodes_stats:
+                    new_episodes_stats[ep_idx] = deepcopy(self.meta.episodes_stats[ep_idx])
+                    
+        new_meta.episodes = new_episodes
+        
+        # Create a temporary directory to store updated files
+        temp_dir = tempfile.mkdtemp(prefix="lerobot_dataset_temp_")
+        temp_root = Path(temp_dir)
+        
+        try:
+            # Step 3: Re-encode videos for affected episodes
+            # Write updated metadata and dataset files
+            self._write_updated_dataset_with_deleted_frames(
+                new_hf_dataset,
+                new_meta,
+                operations_by_episode,
+                temp_root
+            )
+            
+            # Replace the original dataset with the updated one
+            self._replace_dataset_folder(self.root, temp_root, backup)
+            
+            # Reload the dataset with the updated files
+            updated_dataset = LeRobotDataset(
+                repo_id=self.repo_id,
+                root=self.root,
+                episodes=None,  # Load all episodes
+                image_transforms=self.image_transforms,
+                delta_timestamps=self.delta_timestamps,
+                tolerance_s=self.tolerance_s,
+                revision=self.revision,
+                download_videos=False,
+                video_backend=self.video_backend,
+            )
+            
+            return updated_dataset
+            
+        except Exception as e:
+            shutil.rmtree(temp_root, ignore_errors=True)
+            raise RuntimeError(f"Error during frame deletion: {str(e)}") from e
+        finally:
+            if temp_root.exists():
+                shutil.rmtree(temp_root, ignore_errors=True)
 
 
 class MultiLeRobotDataset(torch.utils.data.Dataset):

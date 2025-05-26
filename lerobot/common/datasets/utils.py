@@ -40,7 +40,6 @@ from lerobot.common.datasets.backward_compatibility import (
     BackwardCompatibilityError,
     ForwardCompatibilityError,
 )
-from lerobot.common.robot_devices.robots.utils import Robot
 from lerobot.common.utils.utils import is_valid_numpy_dtype_string
 from lerobot.configs.types import DictLike, FeatureType, PolicyFeature
 
@@ -52,6 +51,7 @@ STATS_PATH = "meta/stats.json"
 EPISODES_STATS_PATH = "meta/episodes_stats.jsonl"
 TASKS_PATH = "meta/tasks.jsonl"
 SAFETY_VIOLATIONS_PATH = "meta/safety_violations.jsonl"
+GAZE_ANNOTATIONS_PATH = "meta/gaze_annotations.json"
 
 # default value, indicating no safety violation in frame
 SAFETY_VIOLATIONS_NO_VIOLATION = -1
@@ -399,7 +399,7 @@ def get_hf_features_from_features(features: dict) -> datasets.Features:
     return datasets.Features(hf_features)
 
 
-def get_features_from_robot(robot: Robot, use_videos: bool = True) -> dict:
+def get_features_from_robot(robot: Any, use_videos: bool = True) -> dict:
     camera_ft = {}
     if robot.cameras:
         camera_ft = {
@@ -601,7 +601,7 @@ def dataloader_collate_fn(batch):
         all_keys.update(item.keys())
     
     # Special keys that can have variable lengths
-    variable_length_keys = ["expanded_subtasks"]  # Add other variable length keys as needed
+    variable_length_keys = ["expanded_subtasks", "gaze_annotations"]  # Add other variable length keys as needed
     
     result = {}
     for key in all_keys:
