@@ -22,7 +22,7 @@ The majority of changes here involve removing unused code, unifying naming, and 
 import math
 from collections import deque
 from itertools import chain
-from typing import Callable
+from typing import Callable, List
 
 import einops
 import numpy as np
@@ -51,6 +51,7 @@ class ACTPolicy(PreTrainedPolicy):
         self,
         config: ACTConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
+        gaze_loss_weight: float = 0.5
     ):
         """
         Args:
@@ -62,6 +63,8 @@ class ACTPolicy(PreTrainedPolicy):
         super().__init__(config)
         config.validate_features()
         self.config = config
+        self.gaze_loss_weight = gaze_loss_weight
+        self.num_cameras = len(config.image_features) if config.image_features else 0
 
         # TODO: remove this as it is quite hacky
         print(f"n_action_steps default: {self.config.n_action_steps}")
@@ -139,8 +142,9 @@ class ACTPolicy(PreTrainedPolicy):
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         # querying the policy.
+        gaze_preds = None
         if len(self._action_queue) == 0:
-            actions, eoe_preds, _ = self.model(batch)
+            actions, eoe_preds, gaze_preds, _ = self.model(batch)
             actions = actions[:, :self.config.n_action_steps]
             eoe_preds = eoe_preds[:, :self.config.n_action_steps]
 
@@ -154,8 +158,8 @@ class ACTPolicy(PreTrainedPolicy):
             self._eoe_queue.extend(eoe_preds.transpose(0, 1))
         elif force_model_run:
             # predict and throw away:
-            _, _, _ = self.model(batch)
-        return self._action_queue.popleft(), self._eoe_queue.popleft()
+            _, _, gaze_preds, _ = self.model(batch)
+        return self._action_queue.popleft(), self._eoe_queue.popleft(), gaze_preds
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
@@ -164,8 +168,52 @@ class ACTPolicy(PreTrainedPolicy):
             batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
+        if 'gaze_annotations' in batch:
+            batch_size = len(batch['gaze_annotations'])
+            num_cameras = len(self.config.image_features)
+            
+            # Initialize tensors for all cameras
+            # Assuming sequence length - you might need to adjust this based on your data structure
+            # If gaze_annotations has a sequence dimension, use that; otherwise assume 1
+            if isinstance(batch['gaze_annotations'][0], dict):
+                seq_len = 1  # Single timestep per batch element
+            else:
+                seq_len = len(batch['gaze_annotations'][0])  # Multiple timesteps per batch element
+            
+            # Create tensors: [batch_size, seq_len, 2] for each camera
+            gazes_stack = []
+            gazes_mask = []
+            
+            for cam_idx, camera_key in enumerate(self.config.image_features):
+                # Initialize tensors for this camera
+                camera_gazes = torch.zeros(batch_size, seq_len, 2, dtype=torch.float32)
+                camera_mask = torch.zeros(batch_size, seq_len, dtype=torch.bool)
+                
+                # Fill in the data
+                for batch_idx, elem in enumerate(batch['gaze_annotations']):
+                    if seq_len == 1:
+                        # Single timestep case
+                        if camera_key in elem:
+                            camera_gazes[batch_idx, 0, 0] = elem[camera_key]['x']
+                            camera_gazes[batch_idx, 0, 1] = elem[camera_key]['y']
+                            camera_mask[batch_idx, 0] = True
+                        # else: remains False/zero (already initialized)
+                    else:
+                        # Multiple timestep case
+                        for seq_idx, seq_elem in enumerate(elem):
+                            if camera_key in seq_elem:
+                                camera_gazes[batch_idx, seq_idx, 0] = seq_elem[camera_key]['x']
+                                camera_gazes[batch_idx, seq_idx, 1] = seq_elem[camera_key]['y']
+                                camera_mask[batch_idx, seq_idx] = True
+                
+                gazes_stack.append(camera_gazes)
+                gazes_mask.append(camera_mask)
+            
+            batch["action.gaze"] = gazes_stack  # List of [B, T, 2] tensors
+            batch["action.gaze_mask"] = gazes_mask  # List of [B, T] boolean tensors
+
         batch = self.normalize_targets(batch)
-        actions_hat, eoe_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
+        actions_hat, eoe_hat, gaze_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
         # Action loss
         l1_loss = (
@@ -179,21 +227,73 @@ class ACTPolicy(PreTrainedPolicy):
             weight=(~batch["action_is_pad"]).float()
         )
 
+        # Gaze loss
+        gaze_loss = torch.tensor(0.0, device=actions_hat.device)
+        if "action.gaze" in batch and "action.gaze_mask" in batch:
+            gaze_loss = self._compute_gaze_loss(
+                gaze_hat, 
+                batch["action.gaze"], 
+                batch["action.gaze_mask"]
+            )
+
+        # Combine losses
         loss_dict = {
             "l1_loss": l1_loss.item(),
-            "eoe_loss": eoe_loss.item()
+            "eoe_loss": eoe_loss.item(),
+            "gaze_loss": gaze_loss.item() * self.gaze_loss_weight if isinstance(gaze_loss, torch.Tensor) else 0,
         }
+
         if self.config.use_vae:
             mean_kld = (
                 (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
             )
             loss_dict["kld_loss"] = mean_kld.item()
-            loss = l1_loss + eoe_loss + mean_kld * self.config.kl_weight
+            loss = l1_loss + eoe_loss + self.gaze_loss_weight * gaze_loss + mean_kld * self.config.kl_weight
         else:
-            loss = l1_loss + eoe_loss
+            loss = l1_loss + eoe_loss + self.gaze_loss_weight * gaze_loss
 
         return loss, loss_dict
 
+    def _compute_gaze_loss(self, gaze_predictions: List[torch.Tensor], 
+                          gaze_targets: List[torch.Tensor], 
+                          gaze_masks: List[torch.Tensor]) -> torch.Tensor:
+        """
+        Compute loss for gaze prediction across all cameras.
+        
+        Args:
+            gaze_predictions: List of [B, T, 2] tensors, one per camera
+            gaze_targets: List of [B, T, 2] tensors, one per camera  
+            gaze_masks: List of [B, T] boolean masks, one per camera
+            
+        Returns:
+            Scalar gaze loss averaged across all cameras
+        """
+        if len(gaze_predictions) == 0 or len(gaze_targets) == 0:
+            return torch.tensor(0.0, device=gaze_predictions[0].device if gaze_predictions else torch.device('cpu'))
+        
+        total_loss = 0.0
+        valid_cameras = 0
+        
+        for pred, target, mask in zip(gaze_predictions, gaze_targets, gaze_masks):
+            # Ensure targets and masks are on the same device as predictions
+            target = target.to(pred.device)
+            mask = mask.to(pred.device)
+            
+            # Compute MSE loss for (x, y) coordinates
+            coord_loss = F.mse_loss(pred, target, reduction='none')  # [B, T, 2]
+            coord_loss = coord_loss.sum(dim=-1)  # [B, T] - sum over x,y dimensions
+            
+            # Apply mask to only include valid gaze labels
+            masked_loss = coord_loss * mask.float()
+            
+            # Average over valid entries
+            if mask.sum() > 0:
+                camera_loss = masked_loss.sum() / mask.sum()
+                total_loss += camera_loss
+                valid_cameras += 1
+        
+        # Average across cameras (avoid division by zero)
+        return total_loss / max(valid_cameras, 1)
 
 class ACTTemporalEnsembler:
     def __init__(self, temporal_ensemble_coeff: float, chunk_size: int) -> None:
@@ -326,7 +426,9 @@ class ACT(nn.Module):
         # The cls token forms parameters of the latent's distribution (like this [*means, *log_variances]).
         super().__init__()
         self.config = config
-
+        self.num_cameras = len(config.image_features) if config.image_features else 0
+        
+        # All original ACT components (unchanged)
         if self.config.use_vae:
             self.vae_encoder = ACTEncoder(config, is_vae_encoder=True)
             self.vae_encoder_cls_embed = nn.Embedding(1, config.dim_model)
@@ -399,7 +501,18 @@ class ACT(nn.Module):
 
         # Final action regression head on the output of the transformer's decoder.
         self.action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
-        self.eoe_head = nn.Linear(config.dim_model, 1)  # Binary classification head
+        self.eoe_head = nn.Linear(config.dim_model, 1) # binary classification head
+
+        # Gaze prediction heads - one per camera
+        # Each head predicts (x, y) coordinates in [0, 1] normalized space
+        self.gaze_heads = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(config.dim_model, config.dim_model // 4),  # Smaller than action head
+                nn.ReLU(),
+                nn.Linear(config.dim_model // 4, 2),  # Just (x, y)
+                nn.Sigmoid()  # Direct [0, 1] output
+            ) for _ in range(self.num_cameras)
+        ])
 
         self._reset_parameters()
 
@@ -550,7 +663,13 @@ class ACT(nn.Module):
         actions = self.action_head(decoder_out)
         eoe_logits = self.eoe_head(decoder_out)
 
-        return actions, eoe_logits, (mu, log_sigma_x2)
+        # Gaze predictions - one prediction per camera
+        gaze_predictions = []
+        for gaze_head in self.gaze_heads:
+            gaze_pred = gaze_head(decoder_out)  # (B, chunk_size, 2)
+            gaze_predictions.append(gaze_pred)
+
+        return actions, eoe_logits, gaze_predictions, (mu, log_sigma_x2)
 
 
 class ACTEncoder(nn.Module):
