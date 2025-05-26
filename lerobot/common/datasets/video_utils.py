@@ -60,14 +60,14 @@ def decode_video_frames(
 
     Currently supports torchcodec on cpu and pyav.
     """
-    if backend is None:
-        backend = get_safe_default_codec()
-    if backend == "torchcodec":
-        return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
-    elif backend in ["pyav", "video_reader"]:
-        return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, backend)
-    else:
-        raise ValueError(f"Unsupported video backend: {backend}")
+    # if backend is None:
+    #     backend = get_safe_default_codec()
+    # if backend == "torchcodec":
+    #     return decode_video_frames_torchcodec(video_path, timestamps, tolerance_s)
+    # elif backend in ["pyav", "video_reader"]:
+    return decode_video_frames_torchvision(video_path, timestamps, tolerance_s, "pyav")
+    # else:
+    #     raise ValueError(f"Unsupported video backend: {backend}")
 
 
 def decode_video_frames_torchvision(
