@@ -261,8 +261,8 @@ def record(
                 num_processes=cfg.num_image_writer_processes,
                 num_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
             )
-        if not no_robot:
-            sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, cfg.video)
+        # if not no_robot:
+        #     sanity_check_dataset_robot_compatibility(dataset, robot, cfg.fps, cfg.video)
     else:
         # Create empty dataset or load existing saved episodes
         sanity_check_dataset_name(cfg.repo_id, cfg.policy)
@@ -272,6 +272,7 @@ def record(
             root=f'{cfg.root}/{cfg.repo_id}',
             robot=robot,
             use_videos=cfg.video,
+            record_reward=True,
             image_writer_processes=cfg.num_image_writer_processes,
             image_writer_threads=cfg.num_image_writer_threads_per_camera * len(robot.cameras),
         )

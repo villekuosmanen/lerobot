@@ -373,6 +373,8 @@ class LeRobotDatasetMetadata:
         robot_type: str | None = None,
         features: dict | None = None,
         use_videos: bool = True,
+        record_attention: bool = False,
+        record_reward: bool = False,
     ) -> "LeRobotDatasetMetadata": 
         """Creates metadata for a LeRobotDataset."""
         obj = cls.__new__(cls)
@@ -383,6 +385,12 @@ class LeRobotDatasetMetadata:
 
         if robot is not None:
             features = get_features_from_robot(robot, use_videos)
+            if record_attention:
+                attn_features = {"attention": {"dtype": "float32", "shape": (602, 1, 128), "names": None}}
+                features = {**features, **attn_features}
+            if record_reward:
+                reward_features = {"reward": {"dtype": "float32", "shape": (1,), "names": None}}
+                features = {**features, **reward_features}
             robot_type = robot.robot_type
             if not all(cam.fps == fps for cam in robot.cameras.values()):
                 logging.warning(
@@ -396,6 +404,12 @@ class LeRobotDatasetMetadata:
         else:
             # TODO(aliberts, rcadene): implement sanity check for features
             features = {**features, **DEFAULT_FEATURES}
+            if record_attention:
+                attn_features = {"attention": {"dtype": "float32", "shape": (602, 1, 128), "names": None}}
+                features = {**features, **attn_features}
+            if record_reward:
+                reward_features = {"reward": {"dtype": "float32", "shape": (1,), "names": None}}
+                features = {**features, **reward_features}
 
             # check if none of the features contains a "/" in their names,
             # as this would break the dict flattening in the stats computation, which uses '/' as separator
@@ -842,6 +856,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 item['gaze_annotations'] = {}
         else:
             item['gaze_annotations'] = {}
+        # item['gaze_annotations'] = {}
 
         return item
 
@@ -952,11 +967,100 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Return the filtered data
         return filtered_data
 
+    def _interpolate_rewards(self, rewards: list, interpolation_method: str = "linear") -> list:
+        """
+        Interpolate sparse rewards to create dense rewards.
+        
+        Args:
+            rewards: List of reward values (some may be None/NaN for frames without explicit rewards)
+            interpolation_method: Method to use for interpolation ("linear" or "smooth")
+            
+        Returns:
+            List of interpolated reward values
+        """
+        import numpy as np
+        
+        # Convert to numpy array for easier manipulation
+        rewards_array = np.array(rewards, dtype=float)
+        
+        # Find indices where rewards are not None/NaN (keyframes)
+        keyframe_indices = []
+        keyframe_values = []
+        
+        current_reward = -1
+        for i, reward in enumerate(rewards):
+            if reward is not None and reward != current_reward:
+                current_reward = reward
+                keyframe_indices.append(i)
+                keyframe_values.append(reward)
+        
+        if len(keyframe_indices) == 0:
+            # No rewards provided, return all zeros
+            return [0.0] * len(rewards)
+        
+        if len(keyframe_indices) == 1:
+            # Only one reward, fill all frames with that value
+            return [keyframe_values[0]] * len(rewards)
+        
+        # Create interpolated rewards
+        interpolated_rewards = np.zeros(len(rewards))
+        
+        if interpolation_method == "linear":
+            # Linear interpolation between keyframes
+            for i in range(len(keyframe_indices) - 1):
+                start_idx = keyframe_indices[i]
+                end_idx = keyframe_indices[i + 1]
+                start_val = keyframe_values[i]
+                end_val = keyframe_values[i + 1]
+                
+                # Linear interpolation for this segment
+                for j in range(start_idx, end_idx + 1):
+                    if end_idx == start_idx:
+                        interpolated_rewards[j] = start_val
+                    else:
+                        t = (j - start_idx) / (end_idx - start_idx)
+                        interpolated_rewards[j] = start_val + t * (end_val - start_val)
+            
+            # Fill any remaining frames after the last keyframe with the last keyframe value
+            if keyframe_indices[-1] < len(rewards) - 1:
+                interpolated_rewards[keyframe_indices[-1]:] = keyframe_values[-1]
+                
+        elif interpolation_method == "smooth":
+            # Smooth interpolation using cubic spline-like behavior
+            # This creates smoother transitions while preserving keyframe values
+            
+            # For each segment between keyframes, use a smooth curve
+            for i in range(len(keyframe_indices) - 1):
+                start_idx = keyframe_indices[i]
+                end_idx = keyframe_indices[i + 1]
+                start_val = keyframe_values[i]
+                end_val = keyframe_values[i + 1]
+                
+                # Use a smooth curve (sigmoid-like) for interpolation
+                for j in range(start_idx, end_idx + 1):
+                    if end_idx == start_idx:
+                        interpolated_rewards[j] = start_val
+                    else:
+                        t = (j - start_idx) / (end_idx - start_idx)
+                        # Use smoothstep function for smoother transitions
+                        smooth_t = 3 * t * t - 2 * t * t * t
+                        interpolated_rewards[j] = start_val + smooth_t * (end_val - start_val)
+            
+            # Fill any remaining frames after the last keyframe with the last keyframe value
+            if keyframe_indices[-1] < len(rewards) - 1:
+                interpolated_rewards[keyframe_indices[-1]:] = keyframe_values[-1]
+        
+        else:
+            raise ValueError(f"Unknown interpolation method: {interpolation_method}")
+        
+        return interpolated_rewards.tolist()
+
     def save_episode(
         self,
         episode_data: dict | None = None,
         reward: int | None = None,
         policy_name: str | None = None,
+        reward_interpolation_method: str = "smooth",
     ) -> None:
         """
         This will save to disk the current episode in self.episode_buffer.
@@ -964,6 +1068,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             episode_data (dict | None, optional): Dict containing the episode data to save. If None, this will
                 save the current episode in self.episode_buffer, which is filled with 'add_frame'. Defaults to
                 None.
+            reward (int | None, optional): Legacy reward parameter. Defaults to None.
+            policy_name (str | None, optional): Name of the policy used. Defaults to None.
+            reward_interpolation_method (str, optional): Method for interpolating rewards ("linear" or "smooth"). 
+                Defaults to "linear".
         """
         if not episode_data:
             episode_buffer = self.episode_buffer
@@ -987,6 +1095,24 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Given tasks in natural language, find their corresponding task indices
         episode_buffer["task_index"] = np.array([self.meta.get_task_index(task) for task in tasks])
+
+        # Check if reward feature exists and apply interpolation if needed
+        if "reward" in self.features and "reward" in episode_buffer:
+            raw_rewards = episode_buffer["reward"]
+            
+            # Check if we have any non-zero rewards (indicating sparse rewards were provided)
+            # Handle None, NaN, and zero values properly
+            has_sparse_rewards = False
+            for r in raw_rewards:
+                if r is not None and not np.isnan(r) and r != 0.0:
+                    has_sparse_rewards = True
+                    break
+            
+            if has_sparse_rewards:
+                # Apply interpolation to create dense rewards
+                interpolated_rewards = self._interpolate_rewards(raw_rewards, reward_interpolation_method)
+                episode_buffer["reward"] = interpolated_rewards
+                logging.info(f"Applied {reward_interpolation_method} interpolation to rewards for episode {episode_index}")
 
         for key, ft in self.features.items():
             # index, episode_index, task_index are already processed above, and image and video
@@ -1885,6 +2011,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         robot_type: str | None = None,
         features: dict | None = None,
         use_videos: bool = True,
+        record_attention: bool = False,
+        record_reward: bool = False,
         tolerance_s: float = 1e-4,
         image_writer_processes: int = 0,
         image_writer_threads: int = 0,
@@ -1900,6 +2028,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
             robot_type=robot_type,
             features=features,
             use_videos=use_videos,
+            record_attention=record_attention,
+            record_reward=record_reward,
         )
         obj.repo_id = obj.meta.repo_id
         obj.root = obj.meta.root

@@ -88,6 +88,10 @@ class ACTConfig(PreTrainedConfig):
         dropout: Dropout to use in the transformer layers (see code for details).
         kl_weight: The weight to use for the KL-divergence component of the loss if the variational objective
             is enabled. Loss is then calculated as: `reconstruction_loss + kl_weight * kld_loss`.
+        use_reward_head: Whether to use a reward prediction head instead of the end-of-episode head during 
+            training. When enabled, the model predicts continuous reward values between 0 and 1.
+        reward_loss_weight: Weight coefficient for the reward prediction loss. Higher values make the model
+            focus more on learning accurate reward predictions relative to action predictions.
     """
 
     # Input / output structure.
@@ -131,6 +135,10 @@ class ACTConfig(PreTrainedConfig):
     # Training and loss computation.
     dropout: float = 0.1
     kl_weight: float = 10.0
+
+    # Reward prediction head
+    use_reward_head: bool = True
+    reward_loss_weight: float = 2.0
 
     # Training preset
     optimizer_lr: float = 1e-5

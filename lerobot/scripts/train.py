@@ -111,8 +111,8 @@ def update_policy(
 def train(cfg: TrainPipelineConfig):
     cfg.validate()
     logging.info(pformat(cfg.to_dict()))
-    cfg.checkpoint_path = cfg.policy.pretrained_path
-    cfg.policy.pretrained_path = cfg.policy.pretrained_path / "pretrained_model"
+    # cfg.checkpoint_path = cfg.policy.pretrained_path
+    # cfg.policy.pretrained_path = cfg.policy.pretrained_path / "pretrained_model"
 
     if cfg.wandb.enable and cfg.wandb.project:
         wandb_logger = WandBLogger(cfg)

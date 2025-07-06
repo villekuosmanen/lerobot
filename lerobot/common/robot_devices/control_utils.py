@@ -28,6 +28,7 @@ import rerun as rr
 import torch
 from deepdiff import DeepDiff
 from termcolor import colored
+import numpy as np
 
 from lerobot.common.datasets.image_writer import safe_stop_image_writer
 from lerobot.common.datasets.lerobot_dataset import LeRobotDataset
@@ -138,6 +139,8 @@ def init_keyboard_listener():
     events["stop_recording"] = False
     events["reset_robot"] = False
     events["set_master_to_follower"] = False
+    events["add_reward"] = False
+    events["reset_reward"] = False
 
     if is_headless():
         logging.warning(
@@ -167,6 +170,11 @@ def init_keyboard_listener():
                 events["reset_robot"] = True
             elif key == keyboard.Key.space:
                 events["set_master_to_follower"] = True
+            elif key == keyboard.Key.shift_r:
+                events["add_reward"] = True
+            elif key == keyboard.Key.ctrl_r:
+                events["reset_reward"] = True 
+
         except Exception as e:
             print(f"Error handling key press: {e}")
 
@@ -228,13 +236,14 @@ def control_loop(
     policy: PreTrainedPolicy = None,
     fps: int | None = None,
     single_task: str | None = None,
+    num_rewards: int | None = 4
 ):
     # TODO(rcadene): Add option to record logs
     if not robot.is_connected:
         robot.connect()
 
     if events is None:
-        events = {"exit_early": False}
+        events = {"exit_early": False, "add_reward": False, "reset_reward": False}
 
     if control_time_s is None:
         control_time_s = float("inf")
@@ -248,10 +257,24 @@ def control_loop(
     if dataset is not None and fps is not None and dataset.fps != fps:
         raise ValueError(f"The dataset fps should be equal to requested fps ({dataset['fps']} != {fps}).")
 
+    # init rewards
+    if num_rewards is not None:
+        current_reward = 0.0
     timestamp = 0
     start_episode_t = time.perf_counter()
     while timestamp < control_time_s:
         start_loop_t = time.perf_counter()
+        if events["add_reward"]:
+            events["add_reward"] = False
+            if current_reward < 1:
+                print("_____________add_reward")
+                current_reward += 1 / num_rewards
+                if current_reward > 1:
+                    current_reward = 1
+        if events["reset_reward"]:
+            events["reset_reward"] = False
+            print("_____________reset_reward")
+            current_reward = 0.01   # hack to differentiate empty reward from resetted reward
 
         if teleoperate:
             observation, action = robot.teleop_step(record_data=True)
@@ -268,7 +291,7 @@ def control_loop(
                 action = {"action": action}
 
         if dataset is not None:
-            frame = {**observation, **action, "task": single_task}
+            frame = {**observation, **action, "task": single_task, "reward": np.array([current_reward], dtype=np.float32)}
             dataset.add_frame(frame)
 
         # TODO(Steven): This should be more general (for RemoteRobot instead of checking the name, but anyways it will change soon)

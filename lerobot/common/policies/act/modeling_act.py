@@ -117,12 +117,19 @@ class ACTPolicy(PreTrainedPolicy):
             self._eoe_queue = deque([], maxlen=self.config.n_action_steps)
 
     @torch.no_grad
-    def select_action(self,batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor]:
+    def select_action(self,batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor | None]:
         """Select a single action given environment observations.
 
         This method wraps `select_actions` in order to return one action at a time for execution in the
         environment. It works by managing the actions in a queue and only calling `select_actions` when the
         queue is empty.
+        
+        Returns:
+            Tuple of (action, eoe_pred, reward_pred, gaze_preds) where:
+            - action: The predicted action tensor
+            - eoe_pred: End-of-episode prediction (None if using reward head)
+            - reward_pred: Reward prediction (None if using eoe head)
+            - gaze_preds: Gaze predictions (can be None)
         """
         self.eval()
 
@@ -134,20 +141,31 @@ class ACTPolicy(PreTrainedPolicy):
         # If we are doing temporal ensembling, do online updates where we keep track of the number of actions
         # we are ensembling over.
         if self.config.temporal_ensemble_coeff is not None:
-            actions, eoe_preds, _ = self.model(batch)
+            actions, eoe_preds, reward_preds, _, _ = self.model(batch)
             actions = self.unnormalize_outputs({"action": actions})["action"]
             action = self.temporal_ensembler.update(actions)
-            eoe_pred = eoe_preds[0, -1]  # Take last prediction
-            return action, eoe_pred
+            if self.config.use_reward_head and reward_preds is not None:
+                reward_pred = torch.clamp(reward_preds[0, 0], 0.0, 1.0)  # Clamp to [0, 1] range
+                return action, None, reward_pred
+            else:
+                eoe_pred = eoe_preds[0, -1]  # Take last prediction
+                return action, eoe_pred, None
 
         # Action queue logic for n_action_steps > 1. When the action_queue is depleted, populate it by
         # querying the policy.
         gaze_preds = None
+        current_reward_pred = None
+        
         if len(self._action_queue) == 0:
-            actions, eoe_preds, gaze_preds, _ = self.model(batch)
+            actions, eoe_preds, reward_preds, gaze_preds, _ = self.model(batch)
             actions = actions[:, :self.config.n_action_steps]
-            eoe_preds = eoe_preds[:, :self.config.n_action_steps]
-
+            
+            if self.config.use_reward_head and reward_preds is not None:
+                # Store the current reward prediction (single value, not a sequence)
+                current_reward_pred = torch.clamp(reward_preds[0, 0], 0.0, 1.0)  # Clamp to [0, 1] range
+            else:
+                eoe_preds = eoe_preds[:, :self.config.n_action_steps]
+                self._eoe_queue.extend(eoe_preds.transpose(0, 1))
 
             # TODO(rcadene): make _forward return output dictionary?
             actions = self.unnormalize_outputs({"action": actions})["action"]
@@ -155,11 +173,16 @@ class ACTPolicy(PreTrainedPolicy):
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
             self._action_queue.extend(actions.transpose(0, 1))
-            self._eoe_queue.extend(eoe_preds.transpose(0, 1))
         elif force_model_run:
             # predict and throw away:
-            _, _, gaze_preds, _ = self.model(batch)
-        return self._action_queue.popleft(), self._eoe_queue.popleft(), gaze_preds
+            _, _, reward_preds, gaze_preds, _ = self.model(batch)
+            if self.config.use_reward_head and reward_preds is not None:
+                current_reward_pred = torch.clamp(reward_preds[0, 0], 0.0, 1.0)  # Clamp to [0, 1] range
+        
+        if self.config.use_reward_head:
+            return self._action_queue.popleft(), None, current_reward_pred, gaze_preds
+        else:
+            return self._action_queue.popleft(), self._eoe_queue.popleft(), None, gaze_preds
 
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict]:
         """Run the batch through the model and compute the loss for training or validation."""
@@ -213,19 +236,37 @@ class ACTPolicy(PreTrainedPolicy):
             batch["action.gaze_mask"] = gazes_mask  # List of [B, T] boolean tensors
 
         batch = self.normalize_targets(batch)
-        actions_hat, eoe_hat, gaze_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
+        actions_hat, eoe_hat, reward_hat, gaze_hat, (mu_hat, log_sigma_x2_hat) = self.model(batch)
 
         # Action loss
         l1_loss = (
             F.l1_loss(batch["action"], actions_hat, reduction="none") * ~batch["action_is_pad"].unsqueeze(-1)
         ).mean()
-        # End of episode loss (binary cross entropy)
-        eoe_targets = batch["next.done"].unsqueeze(1).expand(-1, eoe_hat.size(1))
-        eoe_loss = F.binary_cross_entropy_with_logits(
-            eoe_hat.squeeze(-1),  # (batch_size, sequence_length)
-            eoe_targets.float(),          # (batch_size, sequence_length)
-            weight=(~batch["action_is_pad"]).float()
-        )
+        
+        # End of episode loss (binary cross entropy) or reward loss (MSE)
+        if self.config.use_reward_head and reward_hat is not None:
+            # Reward prediction loss - use MSE for continuous values
+            if "reward" in batch:
+                reward_targets = batch["reward"]  # (B, 1) - current reward only
+                # Clamp predictions to [0, 1] range for loss computation
+                reward_preds_clamped = torch.clamp(reward_hat.squeeze(), 0.0, 1.0)
+                reward_loss = F.mse_loss(
+                    reward_preds_clamped,  # (batch_size, 1) - clamped to [0, 1]
+                    reward_targets,  # (batch_size, 1)
+                    reduction="mean"
+                )
+            else:
+                reward_loss = torch.tensor(0.0, device=actions_hat.device)
+            eoe_loss = torch.tensor(0.0, device=actions_hat.device)
+        else:
+            # End of episode loss (binary cross entropy)
+            eoe_targets = batch["next.done"].unsqueeze(1).expand(-1, eoe_hat.size(1))
+            eoe_loss = F.binary_cross_entropy_with_logits(
+                eoe_hat.squeeze(-1),  # (batch_size, sequence_length)
+                eoe_targets.float(),          # (batch_size, sequence_length)
+                weight=(~batch["action_is_pad"]).float()
+            )
+            reward_loss = torch.tensor(0.0, device=actions_hat.device)
 
         # Gaze loss
         gaze_loss = torch.tensor(0.0, device=actions_hat.device)
@@ -240,6 +281,7 @@ class ACTPolicy(PreTrainedPolicy):
         loss_dict = {
             "l1_loss": l1_loss.item(),
             "eoe_loss": eoe_loss.item(),
+            "reward_loss": reward_loss.item() * self.config.reward_loss_weight,
             "gaze_loss": gaze_loss.item() * self.gaze_loss_weight if isinstance(gaze_loss, torch.Tensor) else 0,
         }
 
@@ -248,9 +290,9 @@ class ACTPolicy(PreTrainedPolicy):
                 (-0.5 * (1 + log_sigma_x2_hat - mu_hat.pow(2) - (log_sigma_x2_hat).exp())).sum(-1).mean()
             )
             loss_dict["kld_loss"] = mean_kld.item()
-            loss = l1_loss + eoe_loss + self.gaze_loss_weight * gaze_loss + mean_kld * self.config.kl_weight
+            loss = l1_loss + eoe_loss + self.config.reward_loss_weight * reward_loss + self.gaze_loss_weight * gaze_loss + mean_kld * self.config.kl_weight
         else:
-            loss = l1_loss + eoe_loss + self.gaze_loss_weight * gaze_loss
+            loss = l1_loss + eoe_loss + self.config.reward_loss_weight * reward_loss + self.gaze_loss_weight * gaze_loss
 
         return loss, loss_dict
 
@@ -501,7 +543,21 @@ class ACT(nn.Module):
 
         # Final action regression head on the output of the transformer's decoder.
         self.action_head = nn.Linear(config.dim_model, self.config.action_feature.shape[0])
-        self.eoe_head = nn.Linear(config.dim_model, 1) # binary classification head
+        
+        # Either end-of-episode head or reward prediction head
+        if config.use_reward_head:
+            # Reward prediction head: predicts continuous values between 0 and 1
+            self.reward_head = nn.Sequential(
+                nn.Linear(config.dim_model, config.dim_model // 2),
+                nn.ReLU(),
+                nn.Linear(config.dim_model // 2, config.dim_model // 4),
+                nn.ReLU(),
+                nn.Linear(config.dim_model // 4, 1),
+                nn.Sigmoid(),
+                # No activation - let the network learn the full range naturally
+            )
+        else:
+            self.eoe_head = nn.Linear(config.dim_model, 1)  # binary classification head
 
         # Gaze prediction heads - one per camera
         # Each head predicts (x, y) coordinates in [0, 1] normalized space
@@ -661,7 +717,15 @@ class ACT(nn.Module):
         decoder_out = decoder_out.transpose(0, 1)
 
         actions = self.action_head(decoder_out)
-        eoe_logits = self.eoe_head(decoder_out)
+        
+        # Either reward predictions or end-of-episode predictions
+        if self.config.use_reward_head:
+            # Only predict reward for the current timestep (first position in chunk)
+            reward_preds = self.reward_head(decoder_out[:, 0:1, :])  # (B, 1, 1) - only first timestep
+            eoe_logits = None
+        else:
+            eoe_logits = self.eoe_head(decoder_out)
+            reward_preds = None
 
         # Gaze predictions - one prediction per camera
         gaze_predictions = []
@@ -669,7 +733,7 @@ class ACT(nn.Module):
             gaze_pred = gaze_head(decoder_out)  # (B, chunk_size, 2)
             gaze_predictions.append(gaze_pred)
 
-        return actions, eoe_logits, gaze_predictions, (mu, log_sigma_x2)
+        return actions, eoe_logits, reward_preds, gaze_predictions, (mu, log_sigma_x2)
 
 
 class ACTEncoder(nn.Module):
