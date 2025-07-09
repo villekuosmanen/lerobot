@@ -840,6 +840,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
             # mark everything within 10 timestamps (0.5 seconds) of end as the end episode
             done = True
         item['next.done'] = done
+
+        # Action masking
+        repo_name = self.repo_id.split('/')[1]
+        item['use_action_mask'] = False if (repo_name.startswith('eval_') or repo_name.startswith('fail_')) else True
         
         # Add task as a string
         task_idx = item["task_index"].item()

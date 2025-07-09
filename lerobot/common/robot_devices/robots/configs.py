@@ -662,13 +662,13 @@ class ARX5SingleArmRobotConfig(RobotConfig):
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
                 camera_index=0,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "wrist": OpenCVCameraConfig(
                 camera_index=2,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
@@ -711,19 +711,19 @@ class ARX5BimanualRobotConfig(RobotConfig):
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
                 camera_index=0,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "left_wrist": OpenCVCameraConfig(
                 camera_index=2,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "right_wrist": OpenCVCameraConfig(
                 camera_index=4,  
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
@@ -748,13 +748,13 @@ class ARX5SingleArmFollowOnlyConfig(RobotConfig):
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
                 camera_index=0,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "wrist": OpenCVCameraConfig(
                 camera_index=2,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
@@ -784,19 +784,19 @@ class ARX5BimanualFollowOnlyConfig(RobotConfig):
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
                 camera_index=0,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "left_wrist": OpenCVCameraConfig(
                 camera_index=2,
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
             "right_wrist": OpenCVCameraConfig(
                 camera_index=4,  
-                fps=30,
+                fps=20,
                 width=640,
                 height=480,
             ),
