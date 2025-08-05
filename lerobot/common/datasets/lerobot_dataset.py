@@ -577,7 +577,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
             self.hf_dataset = self.load_hf_dataset()
         except (AssertionError, FileNotFoundError, NotADirectoryError):
             self.revision = get_safe_version(self.repo_id, self.revision)
-            self.download_episodes(download_videos)
+            self.download_episodes(download_videos, force_cache_sync=force_cache_sync)
             self.hf_dataset = self.load_hf_dataset()
 
         self.episode_data_index = get_episode_data_index(self.meta.episodes, self.episodes)
@@ -663,6 +663,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 local_dir=self.root,
                 allow_patterns=allow_patterns,
                 ignore_patterns=ignore_patterns,
+                # cache_dir='tmp/huggingface_cache',
             )
         else:
             snapshot_download(
@@ -672,9 +673,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 local_dir=self.root,
                 allow_patterns=allow_patterns,
                 ignore_patterns=ignore_patterns,
+                # cache_dir='tmp/huggingface_cache',
             )
 
-    def download_episodes(self, download_videos: bool = True) -> None:
+    def download_episodes(self, download_videos: bool = True, force_cache_sync: bool = False) -> None:
         """Downloads the dataset from the given 'repo_id' at the provided version. If 'episodes' is given, this
         will only download those episodes (selected by their episode_index). If 'episodes' is None, the whole
         dataset will be downloaded. Thanks to the behavior of snapshot_download, if the files are already present
@@ -687,7 +689,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         if self.episodes is not None:
             files = self.get_episodes_file_paths()
 
-        self.pull_from_repo(allow_patterns=files, ignore_patterns=ignore_patterns)
+        self.pull_from_repo(allow_patterns=files, ignore_patterns=ignore_patterns, force_cache_sync=force_cache_sync)
 
     def get_episodes_file_paths(self) -> list[Path]:
         episodes = self.episodes if self.episodes is not None else list(range(self.meta.total_episodes))

@@ -52,7 +52,8 @@ class ACTPolicy(PreTrainedPolicy):
         self,
         config: ACTConfig,
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
-        gaze_loss_weight: float = 0.5
+        gaze_loss_weight: float = 0.5,
+        use_optimiser: bool = False,
     ):
         """
         Args:
@@ -82,7 +83,10 @@ class ACTPolicy(PreTrainedPolicy):
         )
 
         self.model = ACT(config)
-        self.optimiser = ActionLiPo()   # TODO - does not consider model action dimension
+        if use_optimiser:
+            self.optimiser = ActionLiPo()   # TODO - does not consider model action dimension
+        else:
+            self.optimiser = None
 
         if config.temporal_ensemble_coeff is not None:
             self.temporal_ensembler = ACTTemporalEnsembler(config.temporal_ensemble_coeff, config.chunk_size)
@@ -159,7 +163,7 @@ class ACTPolicy(PreTrainedPolicy):
         gaze_preds = None
         current_reward_pred = None
         
-        if len(self._action_queue) <= 10:
+        if len(self._action_queue) <= 20:
             actions, eoe_preds, reward_preds, gaze_preds, _ = self.model(batch)
             actions = actions[:, :self.config.n_action_steps]
             
@@ -173,15 +177,20 @@ class ACTPolicy(PreTrainedPolicy):
             # TODO(rcadene): make _forward return output dictionary?
             actions = self.unnormalize_outputs({"action": actions})["action"]
 
+            if self.optimiser is not None:
             # optimise action chunk via LiPo
-            print("****** Using LiPo ******")
-            solved, _ = self.optimiser.solve(actions.cpu().squeeze(0).numpy(), self._previous_actions, len_past_actions=10 if self._previous_actions is not None else 0)
-            self._previous_actions = solved
+                print("****** Using LiPo ******")
+                solved, _ = self.optimiser.solve(actions.cpu().squeeze(0).numpy(), self._previous_actions, len_past_actions=20 if self._previous_actions is not None else 0)
+                solved = solved[:60]
+                self._previous_actions = solved
 
             # `self.model.forward` returns a (batch_size, n_action_steps, action_dim) tensor, but the queue
             # effectively has shape (n_action_steps, batch_size, *), hence the transpose.
-            self.reset()
-            self._action_queue.extend(torch.from_numpy(solved).cuda().unsqueeze(0).transpose(0, 1))
+                self.reset()
+                self._action_queue.extend(torch.from_numpy(solved).cuda().unsqueeze(0).transpose(0, 1))
+            else:
+                self.reset()
+                self._action_queue.extend(actions.transpose(0, 1))
         elif force_model_run:
             # predict and throw away:
             _, _, reward_preds, gaze_preds, _ = self.model(batch)
