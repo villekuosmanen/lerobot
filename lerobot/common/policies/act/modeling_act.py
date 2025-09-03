@@ -68,12 +68,6 @@ class ACTPolicy(PreTrainedPolicy):
         self.gaze_loss_weight = gaze_loss_weight
         self.num_cameras = len(config.image_features) if config.image_features else 0
 
-        # TODO: remove this as it is quite hacky
-        print(f"n_action_steps default: {self.config.n_action_steps}")
-        # self.config.n_action_steps = 8
-        # self.config.temporal_ensemble_coeff = 0.01
-        print(f"n_action_steps override: {self.config.n_action_steps}")
-
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
         self.normalize_targets = Normalize(
             config.output_features, config.normalization_mapping, dataset_stats
@@ -122,6 +116,24 @@ class ACTPolicy(PreTrainedPolicy):
             self._action_queue = deque([], maxlen=self.config.n_action_steps)
             self._eoe_queue = deque([], maxlen=self.config.n_action_steps)
             self._previous_actions = None
+
+    @torch.no_grad
+    def predict_action_chunk(self, batch: dict[str, Tensor]) -> Tensor:
+        self.eval()
+        batch = self.normalize_inputs(batch)
+        if self.config.image_features:
+            batch = dict(batch)  # shallow copy so that adding a key doesn't modify the original
+            batch["observation.images"] = [batch[key] for key in self.config.image_features]
+
+        actions, _, _, _, _ = self.model(batch)
+        actions = actions[:, :self.config.n_action_steps]
+        actions = self.unnormalize_outputs({"action": actions})["action"]
+        if self.optimiser is not None:
+            # optimise action chunk via LiPo
+            print("****** Using LiPo ******")
+            solved, _ = self.optimiser.solve(actions.cpu().squeeze(0).numpy(), self._previous_actions, len_past_actions=20 if self._previous_actions is not None else 0)
+            actions = torch.from_numpy(solved).cuda().unsqueeze(0).transpose(0, 1)
+        return actions
 
     @torch.no_grad
     def select_action(self,batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor | None]:
@@ -181,6 +193,7 @@ class ACTPolicy(PreTrainedPolicy):
             # optimise action chunk via LiPo
                 print("****** Using LiPo ******")
                 solved, _ = self.optimiser.solve(actions.cpu().squeeze(0).numpy(), self._previous_actions, len_past_actions=20 if self._previous_actions is not None else 0)
+                action_chunk = torch.from_numpy(solved).cuda().unsqueeze(0).transpose(0, 1)
                 solved = solved[:60]
                 self._previous_actions = solved
 
@@ -275,7 +288,7 @@ class ACTPolicy(PreTrainedPolicy):
         if self.config.use_reward_head and reward_hat is not None:
             # Reward prediction loss - use MSE for continuous values
             if "reward" in batch:
-                reward_targets = batch["reward"]  # (B, 1) - current reward only
+                reward_targets = batch["reward"][:, 0]  # (B, 1) - current reward only
                 # Clamp predictions to [0, 1] range for loss computation
                 reward_preds_clamped = torch.clamp(reward_hat.squeeze(), 0.0, 1.0)
                 reward_loss = F.mse_loss(
