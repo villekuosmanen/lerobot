@@ -83,6 +83,7 @@ from lerobot.common.datasets.video_utils import (
     get_safe_default_codec,
     get_video_info,
 )
+from lerobot.common.datasets.synthetic_trajectories import SyntheticTrajectoryGenerator
 # from lerobot.common.robot_devices.robots.utils import Robot
 
 CODEBASE_VERSION = "v2.1"
@@ -442,6 +443,8 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
+        use_synthetic_trajectories: bool = True,
+        synthetic_config: dict | None = None,
     ):
         """
         2 modes are available for instantiating this class, depending on 2 different use cases:
@@ -543,6 +546,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
                 True.
             video_backend (str | None, optional): Video backend to use for decoding videos. Defaults to torchcodec when available int the platform; otherwise, defaults to 'pyav'.
                 You can also use the 'pyav' decoder used by Torchvision, which used to be the default option, or 'video_reader' which is another decoder of Torchvision.
+            use_synthetic_trajectories (bool, optional): Enable synthetic trajectory generation for data
+                augmentation and ablation studies. Defaults to False.
+            synthetic_config (dict | None, optional): Configuration parameters for synthetic trajectory
+                generation. Only used if use_synthetic_trajectories is True. Defaults to None.
         """
         super().__init__()
         self.repo_id = repo_id
@@ -558,6 +565,14 @@ class LeRobotDataset(torch.utils.data.Dataset):
         # Unused attributes
         self.image_writer = None
         self.episode_buffer = None
+
+        # Initialize synthetic trajectory generator if enabled
+        if use_synthetic_trajectories:
+            synthetic_config = synthetic_config or {}
+            self.synthetic_generator = SyntheticTrajectoryGenerator(**synthetic_config)
+            logging.info("Synthetic trajectory generation enabled")
+        else:
+            self.synthetic_generator = None
 
         self.root.mkdir(exist_ok=True, parents=True)
 
@@ -863,6 +878,10 @@ class LeRobotDataset(torch.utils.data.Dataset):
         else:
             item['gaze_annotations'] = {}
         # item['gaze_annotations'] = {}
+
+        # Apply synthetic trajectory generation if enabled
+        if self.synthetic_generator is not None:
+            item = self.synthetic_generator.generate_synthetic_trajectory(item)
 
         return item
 

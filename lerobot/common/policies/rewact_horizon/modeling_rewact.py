@@ -54,6 +54,9 @@ class REWACTPolicy(PreTrainedPolicy):
         dataset_stats: dict[str, dict[str, Tensor]] | None = None,
         gaze_loss_weight: float = 0.5,
         use_optimiser: bool = False,
+        enable_reward_completion: bool = False,
+        reward_completion_threshold: float = 0.9,
+        reward_completion_history_length: int = 20,
     ):
         """
         Args:
@@ -61,12 +64,22 @@ class REWACTPolicy(PreTrainedPolicy):
                     the configuration class is used.
             dataset_stats: Dataset statistics to be used for normalization. If not passed here, it is expected
                 that they will be passed with a call to `load_state_dict` before the policy is used.
+            gaze_loss_weight: Weight for gaze prediction loss.
+            use_optimiser: Whether to use action optimization (LiPo).
+            enable_reward_completion: Enable automatic reward completion for successful task completion.
+            reward_completion_threshold: Reward threshold to consider task "complete".
+            reward_completion_history_length: How far back to check for reward completion.
         """
         super().__init__(config)
         config.validate_features()
         self.config = config
         self.gaze_loss_weight = gaze_loss_weight
         self.num_cameras = len(config.image_features) if config.image_features else 0
+        
+        # Reward completion settings
+        self.enable_reward_completion = enable_reward_completion
+        self.reward_completion_threshold = reward_completion_threshold
+        self.reward_completion_history_length = reward_completion_history_length
 
         self.normalize_inputs = Normalize(config.input_features, config.normalization_mapping, dataset_stats)
         self.normalize_targets = Normalize(
@@ -251,19 +264,39 @@ class REWACTPolicy(PreTrainedPolicy):
             batch["observation.images"] = [batch[key] for key in self.config.image_features]
 
         if 'reward' in batch:
-            current_reward = batch['reward']  # Shape: (batch_size, sequence_length) = (32, 100)
+            current_reward = batch['reward']  # Shape: (batch_size, temporal_sequence_length)
             batch_size = current_reward.shape[0]
             
-            # Extract rewards at specified horizon steps
-            # horizon_steps contains indices like [0, 5, 10, 15, 20, ...]
-            horizon_indices = torch.tensor(self.config.horizon_steps, device=current_reward.device)
+            # Apply reward completion if enabled
+            if self.enable_reward_completion and self.training:
+                current_reward = self._apply_reward_completion(current_reward)
             
-            # Clamp indices to ensure they don't exceed sequence length
-            max_seq_len = current_reward.shape[1]
-            horizon_indices = torch.clamp(horizon_indices, 0, max_seq_len - 1)
+            # Map horizon steps to indices in the temporal reward sequence
+            # The reward tensor from delta_timestamps has structure:
+            # [past_rewards(-20 to -1), current_and_future_rewards(0 to max_horizon)]
+            if hasattr(self.config, 'reward_delta_indices') and self.config.reward_delta_indices is not None:
+                reward_delta_indices = self.config.reward_delta_indices
+                # Find the offset where current time (index 0) starts
+                current_time_offset = reward_delta_indices.index(0) if 0 in reward_delta_indices else 0
+                
+                # Map horizon steps to positions in the temporal sequence
+                horizon_indices = []
+                for horizon_step in self.config.horizon_steps:
+                    temporal_idx = current_time_offset + horizon_step
+                    # Ensure we don't exceed the available temporal data
+                    temporal_idx = min(temporal_idx, current_reward.shape[1] - 1)
+                    horizon_indices.append(temporal_idx)
+                
+                horizon_indices = torch.tensor(horizon_indices, device=current_reward.device)
+            
+            else:
+                # Fallback to direct indexing (legacy behavior)
+                horizon_indices = torch.tensor(self.config.horizon_steps, device=current_reward.device)
+                max_seq_len = current_reward.shape[1]
+                horizon_indices = torch.clamp(horizon_indices, 0, max_seq_len - 1)
             
             # Index into the reward tensor: (batch_size, len(horizon_steps))
-            reward_targets = current_reward[:, horizon_indices]  # Shape: (32, len(horizon_steps))
+            reward_targets = current_reward[:, horizon_indices]  # Shape: (batch_size, len(horizon_steps))
             
             batch['reward_horizons'] = reward_targets
         else:
@@ -474,6 +507,9 @@ class REWACTPolicy(PreTrainedPolicy):
     def _apply_cotraining_strategy(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         """Apply co-training strategy by randomly splitting batch into action-focused and reward-focused samples.
         
+        Synthetic examples are always used for reward training since they provide valuable reward signal
+        (e.g., reward completion, backwards trajectories with flipped rewards, etc.).
+        
         Args:
             batch: Input batch dictionary
             
@@ -494,6 +530,20 @@ class REWACTPolicy(PreTrainedPolicy):
         # Use a device-appropriate random generator for better reproducibility
         device = batch["index"].device if "index" in batch else torch.device('cpu')
         action_focus_mask = torch.rand(batch_size, device=device) < self.config.cotraining_ratio
+        
+        # Override: Force all synthetic examples to be reward-focused
+        # Synthetic trajectories are specifically designed to provide useful reward training signal
+        if "is_synthetic" in batch:
+            is_synthetic = batch["is_synthetic"]
+            if isinstance(is_synthetic, (list, tuple)):
+                # Convert list to tensor if needed
+                is_synthetic = torch.tensor(is_synthetic, dtype=torch.bool, device=device)
+            elif not isinstance(is_synthetic, torch.Tensor):
+                # Handle single values or other types
+                is_synthetic = torch.tensor([is_synthetic] * batch_size, dtype=torch.bool, device=device)
+            
+            # Force synthetic examples to be reward-focused (False = reward focus)
+            action_focus_mask = action_focus_mask & ~is_synthetic
         
         # Create training focus indicators
         batch["action_focus_mask"] = action_focus_mask  # (B,) - True for action-focused samples
@@ -566,6 +616,45 @@ class REWACTPolicy(PreTrainedPolicy):
         
         # Average across cameras (avoid division by zero)
         return total_loss / max(valid_cameras, 1)
+    
+    def _apply_reward_completion(self, rewards: torch.Tensor) -> torch.Tensor:
+        """
+        Apply reward completion logic: if a task is completed (high reward achieved
+        and sustained), force all subsequent rewards to 1.0.
+        
+        Args:
+            rewards: Tensor of shape (batch_size, sequence_length) containing reward values
+            
+        Returns:
+            Modified reward tensor with completion logic applied
+        """
+        batch_size, seq_len = rewards.shape
+        modified_rewards = rewards.clone()
+        
+        for batch_idx in range(batch_size):
+            reward_sequence = rewards[batch_idx]
+            
+            # Find completion points (where reward >= threshold)
+            completion_mask = reward_sequence >= self.reward_completion_threshold
+            
+            if completion_mask.any():
+                completion_indices = torch.where(completion_mask)[0]
+                first_completion = completion_indices[0].item()
+                
+                # Check if completion is sustained over the history length
+                history_start = max(0, first_completion - self.reward_completion_history_length)
+                history_end = min(seq_len, first_completion + self.reward_completion_history_length)
+                
+                # Calculate the proportion of high rewards in the history window
+                history_rewards = reward_sequence[history_start:history_end]
+                high_reward_proportion = (history_rewards >= self.reward_completion_threshold).float().mean()
+                
+                # If completion is sustained (>50% of history window has high rewards), 
+                # set all subsequent rewards to 1.0
+                if high_reward_proportion > 0.5:
+                    modified_rewards[batch_idx, first_completion:] = 1.0
+        
+        return modified_rewards
 
 class ACTTemporalEnsembler:
     def __init__(self, temporal_ensemble_coeff: float, chunk_size: int) -> None:
@@ -864,6 +953,28 @@ class ACT(nn.Module):
         else:
             batch_size = batch["observation.environment_state"].shape[0]
 
+        # Extract current observation state from temporal sequence if needed
+        # When observation_delta_indices is used, observation.state has shape (B, T, state_dim)
+        # We need just the current timestep for VAE encoder and main encoder
+        current_obs_state = None
+        if "observation.state" in batch and self.config.robot_state_feature:
+            obs_state = batch["observation.state"]
+            if len(obs_state.shape) == 3:  # (B, T, state_dim) - temporal sequence
+                # Find current timestep (index 0 in delta_indices)
+                if hasattr(self.config, 'observation_delta_indices') and self.config.observation_delta_indices is not None:
+                    try:
+                        current_time_idx = self.config.observation_delta_indices.index(0)
+                        current_obs_state = obs_state[:, current_time_idx, :]  # (B, state_dim)
+                    except ValueError:
+                        # Index 0 not found, use last timestep
+                        current_obs_state = obs_state[:, -1, :]
+                else:
+                    current_obs_state = obs_state[:, -1, :]  # Use last timestep as fallback
+            elif len(obs_state.shape) == 2:  # (B, state_dim) - single timestep
+                current_obs_state = obs_state
+            else:
+                raise ValueError(f"Unexpected observation.state shape: {obs_state.shape}. Expected (B, state_dim) or (B, T, state_dim)")
+
         # Prepare the latent for input to the transformer encoder.
         if self.config.use_vae and "action" in batch:
             # Prepare the input to the VAE encoder: [cls, *joint_space_configuration, *action_sequence].
@@ -871,7 +982,7 @@ class ACT(nn.Module):
                 self.vae_encoder_cls_embed.weight, "1 d -> b 1 d", b=batch_size
             )  # (B, 1, D)
             if self.config.robot_state_feature:
-                robot_state_embed = self.vae_encoder_robot_state_input_proj(batch["observation.state"])
+                robot_state_embed = self.vae_encoder_robot_state_input_proj(current_obs_state)
                 robot_state_embed = robot_state_embed.unsqueeze(1)  # (B, 1, D)
             action_embed = self.vae_encoder_action_input_proj(batch["action"])  # (B, S, D)
 
@@ -879,6 +990,19 @@ class ACT(nn.Module):
                 vae_encoder_input = [cls_embed, robot_state_embed, action_embed]  # (B, S+2, D)
             else:
                 vae_encoder_input = [cls_embed, action_embed]
+            
+            # Debug: check tensor shapes before concatenation
+            for i, tensor in enumerate(vae_encoder_input):
+                if tensor.dim() not in [3]:
+                    logging.error(f"VAE encoder input tensor {i} has unexpected shape: {tensor.shape}. Expected 3D tensor (B, S, D)")
+                    logging.error(f"cls_embed shape: {cls_embed.shape}")
+                    if self.config.robot_state_feature:
+                        logging.error(f"robot_state_embed shape: {robot_state_embed.shape}")
+                        logging.error(f"current_obs_state shape: {current_obs_state.shape if current_obs_state is not None else 'None'}")
+                    logging.error(f"action_embed shape: {action_embed.shape}")
+                    logging.error(f"batch['action'] shape: {batch['action'].shape}")
+                    raise ValueError(f"Tensor {i} has wrong shape for VAE encoder concatenation: {tensor.shape}")
+            
             vae_encoder_input = torch.cat(vae_encoder_input, axis=1)
 
             # Prepare fixed positional embedding.
@@ -888,10 +1012,13 @@ class ACT(nn.Module):
             # Prepare key padding mask for the transformer encoder. We have 1 or 2 extra tokens at the start of the
             # sequence depending whether we use the input states or not (cls and robot state)
             # False means not a padding token.
+            device = (current_obs_state.device if current_obs_state is not None 
+                     else batch["action"].device if "action" in batch 
+                     else next(self.parameters()).device)
             cls_joint_is_pad = torch.full(
                 (batch_size, 2 if self.config.robot_state_feature else 1),
                 False,
-                device=batch["observation.state"].device,
+                device=device,
             )
             key_padding_mask = torch.cat(
                 [cls_joint_is_pad, batch["action_is_pad"]], axis=1
@@ -914,16 +1041,17 @@ class ACT(nn.Module):
             # When not using the VAE encoder, we set the latent to be all zeros.
             mu = log_sigma_x2 = None
             # TODO(rcadene, alexander-soare): remove call to `.to` to speedup forward ; precompute and use buffer
-            latent_sample = torch.zeros([batch_size, self.config.latent_dim], dtype=torch.float32).to(
-                batch["observation.state"].device
-            )
+            device = (current_obs_state.device if current_obs_state is not None 
+                     else batch["action"].device if "action" in batch 
+                     else next(self.parameters()).device)
+            latent_sample = torch.zeros([batch_size, self.config.latent_dim], dtype=torch.float32).to(device)
 
         # Prepare transformer encoder inputs.
         encoder_in_tokens = [self.encoder_latent_input_proj(latent_sample)]
         encoder_in_pos_embed = list(self.encoder_1d_feature_pos_embed.weight.unsqueeze(1))
         # Robot state token.
         if self.config.robot_state_feature:
-            encoder_in_tokens.append(self.encoder_robot_state_input_proj(batch["observation.state"]))
+            encoder_in_tokens.append(self.encoder_robot_state_input_proj(current_obs_state))
         # Environment state token.
         if self.config.env_state_feature:
             encoder_in_tokens.append(

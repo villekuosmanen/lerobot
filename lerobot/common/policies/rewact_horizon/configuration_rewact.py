@@ -221,13 +221,37 @@ class REWACTConfig(PreTrainedConfig):
             raise ValueError("You must provide at least one image or the environment state among the inputs.")
 
     @property
-    def observation_delta_indices(self) -> None:
-        return None
+    def observation_delta_indices(self) -> list | None:
+        """Returns delta indices for observations to support backwards trajectory synthesis.
+        
+        For backwards trajectories, we need access to past observations which will be used
+        as "future actions" in the synthetic trajectory.
+        
+        Returns indices from -chunk_size to 0 to provide sufficient past context.
+        """
+        # Include past observations for backwards trajectory synthesis
+        return list(range(-self.chunk_size, 1))
 
     @property
     def action_delta_indices(self) -> list:
         return list(range(self.chunk_size))
 
     @property
-    def reward_delta_indices(self) -> None:
-        return None
+    def reward_delta_indices(self) -> list | None:
+        """Returns delta indices for reward to support both past and future rewards.
+        
+        This enables:
+        - Past rewards (negative indices) for backwards trajectory synthesis 
+        - Future rewards (positive indices) for standard horizon prediction
+        
+        Returns indices from -20 to +horizon_steps for full temporal context.
+        """
+        if not self.use_reward_head:
+            return None
+        
+        # Include past rewards for backwards trajectories (e.g., -20 to -1)
+        past_indices = list(range(1 - max(self.horizon_steps), 0))
+        # Include current and future rewards (0 to max horizon step)
+        future_indices = list(range(0, max(self.horizon_steps) + 1))
+        
+        return past_indices + future_indices

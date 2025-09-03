@@ -59,8 +59,10 @@ def resolve_delta_timestamps(
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
         if key == "action" and cfg.action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
-        if key.startswith("observation.") and cfg.observation_delta_indices is not None:
+        if key.startswith("observation.state") and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
+        if key == "reward" and cfg.reward_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
 
     if len(delta_timestamps) == 0:
         delta_timestamps = None
@@ -91,6 +93,8 @@ def resolve_delta_timestamps_without_config(
             delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
         if key == "safety_violation_index" and action_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in action_delta_indices]
+        if key == "reward" and action_delta_indices is not None:
+            delta_timestamps["reward"] = [i / ds_meta.fps for i in action_delta_indices]
         if key.startswith("observation.state") and observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in observation_delta_indices]
 
@@ -132,8 +136,11 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             delta_timestamps=delta_timestamps,
             image_transforms=image_transforms,
             video_backend=cfg.dataset.video_backend,
-            force_cache_sync=True,
+            # force_cache_sync=True,
         )
+        # Note: MultiLeRobotDataset doesn't support synthetic trajectories directly
+        # as it operates on multiple datasets. Synthetic trajectories can be enabled
+        # per individual dataset before creating the MultiLeRobotDataset.
         logging.info(
             "Multiple datasets were provided. Applied the following index mapping to the provided datasets: "
             f"{pformat(dataset.repo_id_to_index , indent=2)}"
@@ -141,6 +148,17 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
     else:
         ds_meta = LeRobotDatasetMetadata(cfg.dataset.repo_id)
         delta_timestamps = resolve_delta_timestamps(cfg.policy, ds_meta)
+        # Prepare synthetic trajectory configuration
+        synthetic_config = None
+        if cfg.dataset.use_synthetic_trajectories:
+            synthetic_config = {
+                'synthetic_probability': cfg.dataset.synthetic_trajectory_probability,
+                'reward_completion_prob': cfg.dataset.synthetic_reward_completion_prob,
+                'backwards_prob': cfg.dataset.synthetic_backwards_prob,
+                'stationary_prob': cfg.dataset.synthetic_stationary_prob,
+                'big_jumps_prob': cfg.dataset.synthetic_big_jumps_prob,
+            }
+
         dataset = LeRobotDataset(
             cfg.dataset.repo_id,
             root=cfg.dataset.root,
@@ -149,7 +167,9 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
             image_transforms=image_transforms,
             revision=cfg.dataset.revision,
             video_backend=cfg.dataset.video_backend,
-            force_cache_sync=True,
+            use_synthetic_trajectories=cfg.dataset.use_synthetic_trajectories,
+            synthetic_config=synthetic_config,
+            # force_cache_sync=True,
         )
 
     if cfg.dataset.use_imagenet_stats:
