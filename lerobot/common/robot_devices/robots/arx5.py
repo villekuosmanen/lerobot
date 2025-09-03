@@ -192,6 +192,11 @@ class ARX5Robot:
         self.is_connected = False
         self.logs = {}
 
+        # set teleop offset to 0
+        self.teleop_offset = {}
+        for key in self.config.follower_arms.keys():
+            self.teleop_offset[key] = torch.zeros(DOF + 1)
+
     @property
     def has_camera(self):
         return len(self.cameras) > 0
@@ -277,8 +282,13 @@ class ARX5Robot:
             self.leader_arms[name].calibrate()
 
     def reset(self):
+        # reset leader arms
         for name in self.follower_arms:
             self.follower_arms[name].reset()
+
+        # reset teleop offsets
+        for name in self.teleop_offset:
+            self.teleop_offset[name] = torch.zeros(DOF + 1)
 
     def teleop_step(
         self, record_data=False
@@ -303,7 +313,7 @@ class ARX5Robot:
             if name in self.follower_arms:
                 before_fwrite_t = time.perf_counter()
 
-                action = leader_pos[name]
+                action = np.add(leader_pos[name], self.teleop_offset[name]) # TODO: confirm they are the same shape and this is how to add tensors
                 self.follower_arms[name].send_command(action[0:DOF + 1])
 
                 self.logs[f"write_follower_{name}_goal_pos_dt_s"] = time.perf_counter() - before_fwrite_t
@@ -447,6 +457,25 @@ class ARX5Robot:
             print(f"*** Leader arm '{name}' set to position {follower_pos} ***")
             # unlock the leader arm (??)
             leader_arm.calibrate()
+
+    def lock_teleop_offset(self):
+        """
+        Used to lock the offset between leader and follower arms to their current positions
+        """
+
+        # first get current position of leader
+        leader_pos = {}
+        for name in self.leader_arms:
+            leader_pos[name] = self.leader_arms[name].get_state()
+
+        # then get current position of follower
+        follower_pos = {}
+        for name in self.follower_arms:
+            follower_pos[name] = self.follower_arms[name].get_state()
+
+        # set teleop position for each arm as follower - leader
+        for name in follower_pos:
+            self.teleop_offset[name] = follower_pos[name] - leader_pos[name]
 
     def disconnect(self):
         if not self.is_connected:
