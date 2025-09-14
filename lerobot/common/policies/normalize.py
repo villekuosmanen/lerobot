@@ -157,6 +157,10 @@ class Normalize(nn.Module):
                 # FIXME(aliberts, rcadene): This might lead to silent fail!
                 continue
 
+            # Skip normalization for non-tensor data (e.g., lists of tensors like gaze data)
+            if not isinstance(batch[key], torch.Tensor):
+                continue
+
             norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)
             if norm_mode is NormalizationMode.IDENTITY:
                 continue
@@ -228,6 +232,10 @@ class Unnormalize(nn.Module):
         batch = dict(batch)  # shallow copy avoids mutating the input batch
         for key, ft in self.features.items():
             if key not in batch:
+                continue
+
+            # Skip normalization for non-tensor data (e.g., lists of tensors like gaze data)
+            if not isinstance(batch[key], torch.Tensor):
                 continue
 
             norm_mode = self.norm_map.get(ft.type, NormalizationMode.IDENTITY)

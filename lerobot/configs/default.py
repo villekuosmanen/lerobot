@@ -37,6 +37,13 @@ class DatasetConfig:
     revision: str | None = None
     use_imagenet_stats: bool = True
     video_backend: str = field(default_factory=get_safe_default_codec)
+    # Synthetic trajectory generation for data augmentation and ablation studies
+    use_synthetic_trajectories: bool = False
+    synthetic_trajectory_probability: float = 0.1
+    synthetic_reward_completion_prob: float = 0.25
+    synthetic_backwards_prob: float = 0.25
+    synthetic_stationary_prob: float = 0.25
+    synthetic_big_jumps_prob: float = 0.25
 
 
 @dataclass

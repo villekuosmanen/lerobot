@@ -136,7 +136,7 @@ class ACTPolicy(PreTrainedPolicy):
         return actions
 
     @torch.no_grad
-    def select_action(self,batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor | None]:
+    def select_action(self, batch: dict[str, Tensor], force_model_run: bool = False) -> tuple[Tensor, Tensor | None, Tensor | None, Tensor | None]:
         """Select a single action given environment observations.
 
         This method wraps `select_actions` in order to return one action at a time for execution in the

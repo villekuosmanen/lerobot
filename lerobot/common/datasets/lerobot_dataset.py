@@ -443,7 +443,7 @@ class LeRobotDataset(torch.utils.data.Dataset):
         force_cache_sync: bool = False,
         download_videos: bool = True,
         video_backend: str | None = None,
-        use_synthetic_trajectories: bool = True,
+        use_synthetic_trajectories: bool = False,
         synthetic_config: dict | None = None,
     ):
         """
