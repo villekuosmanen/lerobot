@@ -162,16 +162,18 @@ class Normalize(nn.Module):
                 continue
 
             buffer = getattr(self, "buffer_" + key.replace(".", "_"))
+            # Get original dtype from the batch tensor
+            orig_dtype = batch[key].dtype
 
             if norm_mode is NormalizationMode.MEAN_STD:
-                mean = buffer["mean"]
-                std = buffer["std"]
+                mean = buffer["mean"].to(orig_dtype)
+                std = buffer["std"].to(orig_dtype)
                 assert not torch.isinf(mean).any(), _no_stats_error_str("mean")
                 assert not torch.isinf(std).any(), _no_stats_error_str("std")
                 batch[key] = (batch[key] - mean) / (std + 1e-8)
             elif norm_mode is NormalizationMode.MIN_MAX:
-                min = buffer["min"]
-                max = buffer["max"]
+                min = buffer["min"].to(orig_dtype)
+                max = buffer["max"].to(orig_dtype)
                 assert not torch.isinf(min).any(), _no_stats_error_str("min")
                 assert not torch.isinf(max).any(), _no_stats_error_str("max")
                 # normalize to [0,1]
@@ -181,6 +183,7 @@ class Normalize(nn.Module):
             else:
                 raise ValueError(norm_mode)
         return batch
+
 
 
 class Unnormalize(nn.Module):
