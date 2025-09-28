@@ -61,6 +61,8 @@ def resolve_delta_timestamps(
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.action_delta_indices]
         if key.startswith("observation.state") and cfg.observation_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
+        if key.startswith("observation.images") and cfg.observation_delta_indices is not None:
+            delta_timestamps[key] = [i / ds_meta.fps for i in cfg.observation_delta_indices]
         if key == "reward" and cfg.reward_delta_indices is not None:
             delta_timestamps[key] = [i / ds_meta.fps for i in cfg.reward_delta_indices]
 
@@ -176,10 +178,14 @@ def make_dataset(cfg: TrainPipelineConfig) -> LeRobotDataset | MultiLeRobotDatas
         if isinstance(dataset, MultiLeRobotDataset):
             for ds in dataset._datasets:
                 for key in ds.meta.camera_keys:
+                    if key not in ds.meta.stats:
+                        ds.meta.stats[key] = {}
                     for stats_type, stats in IMAGENET_STATS.items():
                         ds.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
         else:
             for key in dataset.meta.camera_keys:
+                if key not in dataset.meta.stats:
+                    dataset.meta.stats[key] = {}
                 for stats_type, stats in IMAGENET_STATS.items():
                     dataset.meta.stats[key][stats_type] = torch.tensor(stats, dtype=torch.float32)
 
