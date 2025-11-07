@@ -274,7 +274,7 @@ class _DiTNoiseNet(nn.Module):
 
         for k in range(timesteps):
             t = t_all[:, k]
-            x_0 = x_0 - dt * self.forward(x_0, t, condition)
+            x_0 = x_0 + dt * self.forward(x_0, t, condition)
             if self.clip_sample:
                 x_0 = torch.clamp(x_0, -self.clip_sample_range, self.clip_sample_range)
         return x_0
