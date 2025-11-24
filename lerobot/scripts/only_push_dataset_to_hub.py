@@ -8,7 +8,7 @@ branch = "main"
 
 
 dataset = LeRobotDataset(
-    "villekuosmanen/eval_31Jan25",
+    "villekuosmanen/dAgger_pack_toothbrush_Nov22",
     # root='data/villekuosmanen/pack_easter_eggs_into_basket',
 )
 dataset.push_to_hub(tag_version=False)

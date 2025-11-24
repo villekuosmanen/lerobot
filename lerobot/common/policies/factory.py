@@ -31,6 +31,7 @@ from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
 from lerobot.common.policies.rewact_horizon.configuration_rewact import REWACTConfig
+from lerobot.common.policies.actvantage_policy import ACTvantageConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
 
@@ -49,6 +50,10 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
         from lerobot.common.policies.dit_flow.modeling_dit_flow import DiTFlowPolicy
 
         return DiTFlowPolicy
+    elif name == "actvantage":
+        from lerobot.common.policies.actvantage_policy import ACTvantagePolicy
+
+        return ACTvantagePolicy
     elif name == "act":
         from lerobot.common.policies.act.modeling_act import ACTPolicy
 
@@ -82,6 +87,8 @@ def make_policy_config(policy_type: str, **kwargs) -> PreTrainedConfig:
         return ACTConfig(**kwargs)
     elif policy_type == "ditflow":
         return DiTFlowConfig(**kwargs)
+    elif policy_type == "actvantage":
+        return ACTvantageConfig(**kwargs)
     elif policy_type == "vqbet":
         return VQBeTConfig(**kwargs)
     elif policy_type == "pi0":
