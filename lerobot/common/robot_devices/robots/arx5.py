@@ -1,6 +1,7 @@
 from dataclasses import dataclass, field, replace
 from enum import Enum
 import time
+import math
 from typing import Tuple
 
 import os
@@ -148,9 +149,9 @@ class ARX5Arm:
         self.joint_controller.set_joint_cmd(cmd)
 
     def interpolate_arm_position(self, action: np.ndarray):
-        seconds = 5
+        seconds = 3.5
         fps = 30
-        num_steps = seconds * fps
+        num_steps = math.ceil(seconds * fps)
         current_pos = self.get_state()
 
         for i in range(num_steps + 1):  # +1 to include the target

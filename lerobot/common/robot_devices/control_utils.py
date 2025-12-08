@@ -351,7 +351,7 @@ def sanity_check_dataset_name(repo_id, policy_cfg):
 
     # Check if dataset_name does not start with "eval_" but policy is provided
     if policy_cfg is not None and not (
-        dataset_name.startswith("eval_") or dataset_name.startswith("dAgger_")
+        dataset_name.startswith("eval_") or dataset_name.startswith("dAgger_") or dataset_name.startswith("fail_")
     ):
         raise ValueError(
             f"Your dataset name does not begin with 'eval_' ({dataset_name}), but a policy is provided ({policy_cfg.type})."
