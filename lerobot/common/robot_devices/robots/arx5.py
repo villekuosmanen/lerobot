@@ -48,6 +48,8 @@ class ARX5Arm:
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
             "joint_controller", robot_config.joint_dof
         )
+        controller_config.controller_dt = 0.005  # Sets the internal communication frequency (in seconds).
+                                                # Slower CPU + USB I/O processing requires lower frequency comms.
         controller_config.gravity_compensation = True   # TODO: may be default true
         controller_config.background_send_recv = True
 
