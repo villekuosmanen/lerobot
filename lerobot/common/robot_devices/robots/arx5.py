@@ -43,6 +43,9 @@ class ARX5Arm:
             )
         self.is_connected = True
 
+        if self.config.model != "L5":
+            raise ValueError("Creating an ARX robot with non-L5 is probably incorrect in our setup so not allowed.")
+
         robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.config.model)
         robot_config.gripper_torque_max *= 2
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
