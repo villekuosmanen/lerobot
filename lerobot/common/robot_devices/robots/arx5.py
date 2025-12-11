@@ -33,7 +33,6 @@ class ARX5Arm:
         self.config = config
         self.is_connected = False
         self.is_master = is_master
-
         self.joint_controller = None
 
     def connect(self):
@@ -51,7 +50,7 @@ class ARX5Arm:
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
             "joint_controller", robot_config.joint_dof
         )
-        controller_config.controller_dt = 0.005  # Sets the internal communication frequency (in seconds).
+        controller_config.controller_dt = 0.01  # Sets the internal communication frequency (in seconds).
                                                 # Slower CPU + USB I/O processing requires lower frequency comms.
         controller_config.gravity_compensation = True   # TODO: may be default true
         controller_config.background_send_recv = True
@@ -60,7 +59,7 @@ class ARX5Arm:
         print("joint controller created")
         self.joint_controller.reset_to_home()
         # self.joint_controller.enable_gravity_compensation(self.config.urdf_path)
-        # self.joint_controller.set_log_level(arx5.LogLevel.DEBUG)
+        self.joint_controller.set_log_level(arx5.LogLevel.DEBUG)
 
         self.robot_config = robot_config
         print(f"Gripper max width: {self.robot_config.gripper_width}")
@@ -185,6 +184,7 @@ class ARX5Robot:
             config = ARX5RobotConfig()
         # Overwrite config arguments using kwargs
         self.config = replace(config, **kwargs)
+        self.joint_thresholds = np.array([0.25, 0.25, 0.25, 0.3, 0.3, 0.3, 0.10])
         # self.calibration_path = Path(calibration_path)
 
         self.leader_arms = {}
@@ -313,7 +313,12 @@ class ARX5Robot:
         
         follower_goal_pos = {}
         for name in self.leader_arms:
+            follower_current_pos = self.follower_arms[name].get_state()
             follower_goal_pos[name] = leader_pos[name]
+            # Check if goal position is safe - if the difference in individual joints is greater than the threshold
+            # We need to raise an error
+            if np.any(np.abs(follower_goal_pos[name] - follower_current_pos) > self.joint_thresholds):
+                raise ValueError(f"Goal position for {name} is not safe. The difference in individual joints is greater than the threshold.")
 
             # Send action
             if name in self.follower_arms:
