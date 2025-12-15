@@ -48,18 +48,18 @@ class ARX5Arm:
         robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.config.model)
         robot_config.gripper_torque_max *= 2
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
-            "joint_controller", robot_config.joint_dof
+            "cartesian_controller", robot_config.joint_dof
         )
         controller_config.controller_dt = 0.01  # Sets the internal communication frequency (in seconds).
                                                 # Slower CPU + USB I/O processing requires lower frequency comms.
         controller_config.gravity_compensation = True   # TODO: may be default true
         controller_config.background_send_recv = True
 
-        self.joint_controller = arx5.Arx5JointController(robot_config, controller_config, self.config.interface_name)
+        self.joint_controller = arx5.Arx5CartesianController(robot_config, controller_config, self.config.interface_name)
         print("joint controller created")
         self.joint_controller.reset_to_home()
         # self.joint_controller.enable_gravity_compensation(self.config.urdf_path)
-        self.joint_controller.set_log_level(arx5.LogLevel.DEBUG)
+        # self.joint_controller.set_log_level(arx5.LogLevel.DEBUG)
 
         self.robot_config = robot_config
         print(f"Gripper max width: {self.robot_config.gripper_width}")
@@ -109,8 +109,8 @@ class ARX5Arm:
             raise RobotDeviceNotConnectedError(
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
-        joint_state = self.joint_controller.get_joint_state()
-        state = np.concatenate([joint_state.pos().copy(), np.array([joint_state.gripper_pos])])
+        eef_state = self.joint_controller.get_eef_state()
+        state = np.concatenate([eef_state.pose_6d().copy(), np.array([eef_state.gripper_pos])])
         if self.is_master:
             state[-1] *= 3.85
 
@@ -140,17 +140,20 @@ class ARX5Arm:
             raise RobotDeviceNotConnectedError(
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
-        cmd = arx5.JointState(DOF)
-        cmd.pos()[0:DOF] = action[0:DOF]
+        # cmd = arx5.JointState(DOF)
+        # cmd.pos()[0:DOF] = action[0:DOF]
 
         if self.is_master:
             action[DOF] /= 3.85
         if action[DOF] > self.robot_config.gripper_width:
             action[DOF] = self.robot_config.gripper_width
-        cmd.gripper_pos = action[DOF]
+        gripper_pos = action[DOF]
+        # cartesian
+        cartesian_pos = action[0:DOF]
+        eef_cmd = arx5.EEFState(cartesian_pos, gripper_pos)
 
         # Process command, e.g., move joints
-        self.joint_controller.set_joint_cmd(cmd)
+        self.joint_controller.set_eef_cmd(eef_cmd)
 
     def interpolate_arm_position(self, action: np.ndarray):
         seconds = 3.5
@@ -184,7 +187,7 @@ class ARX5Robot:
             config = ARX5RobotConfig()
         # Overwrite config arguments using kwargs
         self.config = replace(config, **kwargs)
-        self.joint_thresholds = np.array([0.25, 0.25, 0.25, 0.3, 0.3, 0.3, 0.10])
+        self.joint_thresholds = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.10])
         # self.calibration_path = Path(calibration_path)
 
         self.leader_arms = {}

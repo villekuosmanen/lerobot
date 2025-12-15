@@ -644,7 +644,7 @@ class ARX5SingleArmRobotConfig(RobotConfig):
         default_factory=lambda: {
             "main": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc0ec",
+                interface_name="enx6c6e0711f4e2",
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }
@@ -653,7 +653,7 @@ class ARX5SingleArmRobotConfig(RobotConfig):
         default_factory=lambda: {
             "main": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc38c",
+                interface_name="enxa0cec881b947",
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }
@@ -661,13 +661,13 @@ class ARX5SingleArmRobotConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
-                camera_index=0,
+                camera_index=2,
                 fps=20,
                 width=640,
                 height=480,
             ),
             "wrist": OpenCVCameraConfig(
-                camera_index=2,
+                camera_index=0,
                 fps=20,
                 width=640,
                 height=480,
@@ -683,12 +683,12 @@ class ARX5BimanualRobotConfig(RobotConfig):
         default_factory=lambda: {
             "left": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc0ec",  
+                interface_name="enx6c6e0711f4e2",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
             "right": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ec6299",  
+                interface_name="enxa0cec889459b",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }
@@ -697,12 +697,12 @@ class ARX5BimanualRobotConfig(RobotConfig):
         default_factory=lambda: {
             "left": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc38c",  
+                interface_name="enxa0cec881b947",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
             "right": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc90b",  
+                interface_name="enx6c6e0711f127",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }
@@ -721,12 +721,12 @@ class ARX5BimanualRobotConfig(RobotConfig):
                 width=640,
                 height=480,
             ),
-            "right_wrist": OpenCVCameraConfig(
-                camera_index=4,  
-                fps=20,
-                width=640,
-                height=480,
-            ),
+            # "right_wrist": OpenCVCameraConfig(
+            #     camera_index=4,  
+            #     fps=20,
+            #     width=640,
+            #     height=480,
+            # ),
         }
     )
 
@@ -739,7 +739,7 @@ class ARX5SingleArmFollowOnlyConfig(RobotConfig):
         default_factory=lambda: {
             "main": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc38c",
+                interface_name="enxa0cec881b947",
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }
@@ -747,13 +747,13 @@ class ARX5SingleArmFollowOnlyConfig(RobotConfig):
     cameras: dict[str, CameraConfig] = field(
         default_factory=lambda: {
             "front": OpenCVCameraConfig(
-                camera_index=0,
+                camera_index=2,
                 fps=20,
                 width=640,
                 height=480,
             ),
             "wrist": OpenCVCameraConfig(
-                camera_index=2,
+                camera_index=0,
                 fps=20,
                 width=640,
                 height=480,
@@ -770,12 +770,12 @@ class ARX5BimanualFollowOnlyConfig(RobotConfig):
         default_factory=lambda: {
             "left": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc38c",  
+                interface_name="enxa0cec881b947",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
             "right": ARX5ArmConfig(
                 model="L5",
-                interface_name="enx5c5310ecc90b",  
+                interface_name="enx6c6e0711f127",  
                 urdf_path="lerobot/models/arx5.urdf",
             ),
         }

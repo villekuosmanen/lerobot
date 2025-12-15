@@ -60,7 +60,7 @@ class RecordControlConfig(ControlConfig):
     # Number of seconds before starting data collection. It allows the robot devices to warmup and synchronize.
     warmup_time_s: int | float = 10
     # Number of seconds for data recording for each episode.
-    episode_time_s: int | float = 80
+    episode_time_s: int | float = 10
     # Number of seconds for resetting the environment after each episode.
     reset_time_s: int | float = 60
     # Number of episodes to record.
@@ -81,7 +81,7 @@ class RecordControlConfig(ControlConfig):
     # Number of threads writing the frames as png images on disk, per camera.
     # Too many threads might cause unstable teleoperation fps due to main thread being blocked.
     # Not enough threads might cause low camera fps.
-    num_image_writer_threads_per_camera: int = 4
+    num_image_writer_threads_per_camera: int = 6
     # Display all cameras on screen
     display_data: bool = True
     # Use vocal synthesis to read events.
