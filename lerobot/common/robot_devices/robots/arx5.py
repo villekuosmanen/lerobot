@@ -54,7 +54,7 @@ class ARX5Arm:
         robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.config.model)
         robot_config.gripper_torque_max *= 2
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
-            self.control_mode, robot_config.joint_dof
+            self.control_mode.value, robot_config.joint_dof
         )
         controller_config.controller_dt = 0.01  # Sets the internal communication frequency (in seconds).
                                                 # Slower CPU + USB I/O processing requires lower frequency comms.
@@ -154,7 +154,8 @@ class ARX5Arm:
             effort[-1] *= 3.85
 
         eef_cartesians = self.robot_controller.get_eef_state()
-        eef_state = np.concatenate([eef_cartesians.pose_6d().copy(), np.array([eef_cartesians.gripper_pos])])
+        eef_state = eef_cartesians.pose_6d().copy()
+        # eef_state = np.concatenate([eef_cartesians.pose_6d().copy(), np.array([eef_cartesians.gripper_pos])])
         return (pos, vel, effort, eef_state)
     
     def send_command(self, action: np.ndarray):
@@ -276,12 +277,12 @@ class ARX5Robot:
             },
             "observation.eef_6d_pose": {
                 "dtype": "float32",
-                "shape": (len(self.follower_arms)*7,), # 7 = 6d eef space + gripper
+                "shape": (len(self.follower_arms)*6,), # 7 = 6d eef space + gripper
             },
         }
 
     def connect(self):
-        if self.is_connected:
+        if self.is_connected:      
             raise RobotDeviceAlreadyConnectedError(
                 "ARX5Robot is already connected. Do not run `robot.connect()` twice."
             )

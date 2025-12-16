@@ -653,7 +653,7 @@ class ARX5RobotConfig:
 @dataclass
 class ARX5SingleArmRobotConfig(RobotConfig):
     """Single-armed ARX5 configuration with both leader and follower arms."""
-    control_mode: ARXControlModel.JOINT_CONTROLLER
+    control_mode = ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
             "main": ARX5ArmConfig(
@@ -693,7 +693,7 @@ class ARX5SingleArmRobotConfig(RobotConfig):
 @dataclass
 class ARX5BimanualRobotConfig(RobotConfig):
     """Bimanual ARX5 configuration with both leader and follower arms."""
-    control_mode: ARXControlModel.JOINT_CONTROLLER
+    control_mode = ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
             "left": ARX5ArmConfig(
@@ -749,7 +749,7 @@ class ARX5BimanualRobotConfig(RobotConfig):
 @dataclass
 class ARX5SingleArmFollowOnlyConfig(RobotConfig):
     """Single-armed ARX5 configuration with follower arm only (for inference)."""
-    control_mode: ARXControlModel.JOINT_CONTROLLER
+    control_mode = ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(default_factory=dict)
     follower_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
@@ -781,7 +781,7 @@ class ARX5SingleArmFollowOnlyConfig(RobotConfig):
 @dataclass
 class ARX5BimanualFollowOnlyConfig(RobotConfig):
     """Bimanual ARX5 configuration with follower arms only (for inference)."""
-    control_mode: ARXControlModel.JOINT_CONTROLLER
+    control_mode = ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(default_factory=dict)
     follower_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {

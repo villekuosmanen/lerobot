@@ -88,6 +88,7 @@ def make_robot_from_config(config: RobotConfig):
     elif isinstance(config, ARX5SingleArmRobotConfig):
         from lerobot.common.robot_devices.robots.arx5 import ARX5Robot
         common_config = ARX5RobotConfig(
+            control_mode=config.control_mode,
             leader_arms=config.leader_arms,
             follower_arms=config.follower_arms,
             cameras=config.cameras
@@ -96,6 +97,7 @@ def make_robot_from_config(config: RobotConfig):
     elif isinstance(config, ARX5BimanualRobotConfig):
         from lerobot.common.robot_devices.robots.arx5 import ARX5Robot
         common_config = ARX5RobotConfig(
+            control_mode=config.control_mode,
             leader_arms=config.leader_arms,
             follower_arms=config.follower_arms,
             cameras=config.cameras
@@ -104,6 +106,7 @@ def make_robot_from_config(config: RobotConfig):
     elif isinstance(config, ARX5SingleArmFollowOnlyConfig):
         from lerobot.common.robot_devices.robots.arx5 import ARX5Robot
         common_config = ARX5RobotConfig(
+            control_mode=config.control_mode,
             leader_arms=config.leader_arms,
             follower_arms=config.follower_arms,
             cameras=config.cameras
@@ -112,6 +115,7 @@ def make_robot_from_config(config: RobotConfig):
     elif isinstance(config, ARX5BimanualFollowOnlyConfig):
         from lerobot.common.robot_devices.robots.arx5 import ARX5Robot
         common_config = ARX5RobotConfig(
+            control_mode=config.control_mode,
             leader_arms=config.leader_arms,
             follower_arms=config.follower_arms,
             cameras=config.cameras

@@ -139,7 +139,7 @@ class ACTvantagePolicy(PreTrainedPolicy):
             return action
 
         # Action queue logic for n_action_steps > 1
-        if len(self._action_queue) <= 60:
+        if len(self._action_queue) <= 80:
             actions = self.predict_action_chunk(batch)
             actions = actions[:, : self.config.n_action_steps]
             self._action_queue.extend(actions.transpose(0, 1))
