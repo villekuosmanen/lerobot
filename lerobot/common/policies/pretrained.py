@@ -158,7 +158,7 @@ class PreTrainedPolicy(nn.Module, HubMixin, abc.ABC):
     #         docs_url=self._hub_mixin_info.docs_url,
     #         **kwargs,
     #     )
-    #     return card         
+    #     return card
 
     @abc.abstractmethod
     def get_optim_params(self) -> dict:

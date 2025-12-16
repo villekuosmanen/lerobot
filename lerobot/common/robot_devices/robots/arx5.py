@@ -40,7 +40,6 @@ class ARX5Arm:
         self.is_connected = False
         self.is_master = is_master
         self.robot_controller = None
-        self.cartesian_controller = None
 
     def connect(self):
         if self.is_connected:
@@ -174,6 +173,7 @@ class ARX5Arm:
         if self.control_mode == ARXControlModel.JOINT_CONTROLLER:
             cmd = arx5.JointState(DOF)
             cmd.pos()[0:DOF] = action[0:DOF]
+            cmd.gripper_pos = gripper_pos
             self.robot_controller.set_joint_cmd(cmd)
         else:
             cartesian_pos = action[0:DOF]
