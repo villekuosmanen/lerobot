@@ -623,6 +623,18 @@ class ARXArmModel(Enum):
     X5 = "X5"
     L5 = "L5"
 
+class ARXControlModel(Enum):
+    """
+    The ARX5 SDK supports two control modes: joint-based or cartesian space based.
+    In this library, joint-based control refers to position control,
+    where we specify the position in radians for the six joints of the arm, as well as the gripper's width.
+    Cartesian control refers to the position and orientation of the end-effector in 6d space, along with the gripper's width.
+
+    It is essential models trained one control mode are only rolled out with the same control mode. Mixing them can result in dangerous behaviour!
+    """
+    JOINT_CONTROLLER = "joint_controller"
+    CARTESIAN_CONTROLLER = "cartesian_controller"
+
 # Configs for ARX5 robot
 @dataclass
 class ARX5ArmConfig:
@@ -632,6 +644,7 @@ class ARX5ArmConfig:
 
 @dataclass
 class ARX5RobotConfig:
+    control_mode: ARXControlModel
     leader_arms: dict[str, ARX5ArmConfig]
     follower_arms: dict[str, ARX5ArmConfig]
     cameras: dict[str, CameraConfig]
@@ -640,6 +653,7 @@ class ARX5RobotConfig:
 @dataclass
 class ARX5SingleArmRobotConfig(RobotConfig):
     """Single-armed ARX5 configuration with both leader and follower arms."""
+    control_mode: ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
             "main": ARX5ArmConfig(
@@ -679,6 +693,7 @@ class ARX5SingleArmRobotConfig(RobotConfig):
 @dataclass
 class ARX5BimanualRobotConfig(RobotConfig):
     """Bimanual ARX5 configuration with both leader and follower arms."""
+    control_mode: ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
             "left": ARX5ArmConfig(
@@ -734,6 +749,7 @@ class ARX5BimanualRobotConfig(RobotConfig):
 @dataclass
 class ARX5SingleArmFollowOnlyConfig(RobotConfig):
     """Single-armed ARX5 configuration with follower arm only (for inference)."""
+    control_mode: ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(default_factory=dict)
     follower_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {
@@ -765,6 +781,7 @@ class ARX5SingleArmFollowOnlyConfig(RobotConfig):
 @dataclass
 class ARX5BimanualFollowOnlyConfig(RobotConfig):
     """Bimanual ARX5 configuration with follower arms only (for inference)."""
+    control_mode: ARXControlModel.JOINT_CONTROLLER
     leader_arms: dict[str, ARX5ArmConfig] = field(default_factory=dict)
     follower_arms: dict[str, ARX5ArmConfig] = field(
         default_factory=lambda: {

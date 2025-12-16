@@ -15,7 +15,11 @@ from lerobot.common.robot_devices.utils import (
     RobotDeviceNotConnectedError,
     busy_wait,
 )
-from lerobot.common.robot_devices.robots.configs import ARX5ArmConfig, ARX5RobotConfig
+from lerobot.common.robot_devices.robots.configs import (
+    ARXControlModel,
+    ARX5ArmConfig,
+    ARX5RobotConfig,
+)
 
 DOF = 6
 MOTOR_NAMES = []
@@ -27,13 +31,16 @@ class ARX5Arm:
 
     def __init__(
         self,
+        control_mode: ARXControlModel,
         config: ARX5ArmConfig,
         is_master: bool,
     ):
+        self.control_mode = control_mode
         self.config = config
         self.is_connected = False
         self.is_master = is_master
-        self.joint_controller = None
+        self.robot_controller = None
+        self.cartesian_controller = None
 
     def connect(self):
         if self.is_connected:
@@ -48,18 +55,25 @@ class ARX5Arm:
         robot_config = arx5.RobotConfigFactory.get_instance().get_config(self.config.model)
         robot_config.gripper_torque_max *= 2
         controller_config = arx5.ControllerConfigFactory.get_instance().get_config(
-            "cartesian_controller", robot_config.joint_dof
+            self.control_mode, robot_config.joint_dof
         )
         controller_config.controller_dt = 0.01  # Sets the internal communication frequency (in seconds).
                                                 # Slower CPU + USB I/O processing requires lower frequency comms.
         controller_config.gravity_compensation = True   # TODO: may be default true
         controller_config.background_send_recv = True
 
-        self.joint_controller = arx5.Arx5CartesianController(robot_config, controller_config, self.config.interface_name)
-        print("joint controller created")
-        self.joint_controller.reset_to_home()
-        # self.joint_controller.enable_gravity_compensation(self.config.urdf_path)
-        # self.joint_controller.set_log_level(arx5.LogLevel.DEBUG)
+        if self.control_mode == ARXControlModel.JOINT_CONTROLLER:
+            self.robot_controller = arx5.Arx5JointController(robot_config, controller_config, self.config.interface_name)
+            print("ARX5 Joint Controller created")
+        elif self.control_mode == ARXControlModel.CARTESIAN_CONTROLLER:
+            self.robot_controller = arx5.Arx5CartesianController(robot_config, controller_config, self.config.interface_name)
+            print("ARX5 Cartesian Controller created")
+        else:
+            raise ValueError(f"Invalid arm control mode provided: expected {ARXControlModel.JOINT_CONTROLLER} or {ARXControlModel.CARTESIAN_CONTROLLER}, got {self.control_mode}")
+        
+        self.robot_controller.reset_to_home()
+        # self.robot_controller.enable_gravity_compensation(self.config.urdf_path)
+        # self.robot_controller.set_log_level(arx5.LogLevel.DEBUG)
 
         self.robot_config = robot_config
         print(f"Gripper max width: {self.robot_config.gripper_width}")
@@ -73,16 +87,16 @@ class ARX5Arm:
         self.is_connected = False
         # safely shut down the follower arm
         if not self.is_master:
-            self.joint_controller.reset_to_home()
-            self.joint_controller.set_to_damping()
-        self.joint_controller = None
+            self.robot_controller.reset_to_home()
+            self.robot_controller.set_to_damping()
+        self.robot_controller = None
 
     def reset(self):
         if not self.is_connected:
             raise RobotDeviceAlreadyConnectedError(
                 "ARX5Arm is not connected. Do not run `robot.disconnect()` twice."
             )
-        self.joint_controller.reset_to_home()
+        self.robot_controller.reset_to_home()
 
     def calibrate(self):
         if not self.is_connected:
@@ -90,27 +104,35 @@ class ARX5Arm:
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
         if self.is_master:
-            self.joint_controller.set_to_damping()
-            gain = self.joint_controller.get_gain()
+            self.robot_controller.set_to_damping()
+            gain = self.robot_controller.get_gain()
             gain.kd()[:3] *= 0.05
             gain.kd()[3:] *= 0.1
-            self.joint_controller.set_gain(gain)
+            self.robot_controller.set_gain(gain)
         else:
             # gripper - make it less aggressive
-            gain = self.joint_controller.get_gain()
+            gain = self.robot_controller.get_gain()
             gain.kd()[:3] /= 1.2
             gain.kd()[3:] *= 1.2
             gain.gripper_kp /= 1.8
             gain.gripper_kd *= 1.8
-            self.joint_controller.set_gain(gain)
+            self.robot_controller.set_gain(gain)
 
     def get_state(self) -> np.ndarray:
+        """
+        Directly returns the relevant control state - either joint positions or cartesians.
+        """
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
-        eef_state = self.joint_controller.get_eef_state()
-        state = np.concatenate([eef_state.pose_6d().copy(), np.array([eef_state.gripper_pos])])
+        
+        if self.control_mode == ARXControlModel.JOINT_CONTROLLER:
+            joint_state = self.robot_controller.get_joint_state()
+            state = np.concatenate([joint_state.pos().copy(), np.array([joint_state.gripper_pos])])
+        else:
+            eef_state = self.robot_controller.get_eef_state()
+            state = np.concatenate([eef_state.pose_6d().copy(), np.array([eef_state.gripper_pos])])
         if self.is_master:
             state[-1] *= 3.85
 
@@ -123,7 +145,7 @@ class ARX5Arm:
             raise RobotDeviceNotConnectedError(
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
-        joint_state = self.joint_controller.get_joint_state()
+        joint_state = self.robot_controller.get_joint_state()
         pos = np.concatenate([joint_state.pos().copy(), np.array([joint_state.gripper_pos])])
         vel = np.concatenate([joint_state.vel().copy(), np.array([joint_state.gripper_vel])])
         effort = np.concatenate([joint_state.torque().copy(), np.array([joint_state.gripper_torque])])
@@ -132,28 +154,31 @@ class ARX5Arm:
             vel[-1] *= 3.85
             effort[-1] *= 3.85
 
-        eef_state = self.joint_controller.get_eef_state()
-        return (pos, vel, effort, eef_state.pose_6d().copy())
+        eef_cartesians = self.robot_controller.get_eef_state()
+        eef_state = np.concatenate([eef_cartesians.pose_6d().copy(), np.array([eef_cartesians.gripper_pos])])
+        return (pos, vel, effort, eef_state)
     
     def send_command(self, action: np.ndarray):
         if not self.is_connected:
             raise RobotDeviceNotConnectedError(
                 "ARX5Arm is not connected. You need to run `robot.connect()`."
             )
-        # cmd = arx5.JointState(DOF)
-        # cmd.pos()[0:DOF] = action[0:DOF]
-
+        
+        # Rescale gripper width
         if self.is_master:
             action[DOF] /= 3.85
         if action[DOF] > self.robot_config.gripper_width:
             action[DOF] = self.robot_config.gripper_width
         gripper_pos = action[DOF]
-        # cartesian
-        cartesian_pos = action[0:DOF]
-        eef_cmd = arx5.EEFState(cartesian_pos, gripper_pos)
-
-        # Process command, e.g., move joints
-        self.joint_controller.set_eef_cmd(eef_cmd)
+        
+        if self.control_mode == ARXControlModel.JOINT_CONTROLLER:
+            cmd = arx5.JointState(DOF)
+            cmd.pos()[0:DOF] = action[0:DOF]
+            self.robot_controller.set_joint_cmd(cmd)
+        else:
+            cartesian_pos = action[0:DOF]
+            eef_cmd = arx5.EEFState(cartesian_pos, gripper_pos)
+            self.robot_controller.set_eef_cmd(eef_cmd)
 
     def interpolate_arm_position(self, action: np.ndarray):
         seconds = 3.5
@@ -184,18 +209,21 @@ class ARX5Robot:
         **kwargs,
     ):
         if config is None:
-            config = ARX5RobotConfig()
+            raise ValueError("No robot config provided.")
         # Overwrite config arguments using kwargs
         self.config = replace(config, **kwargs)
-        self.joint_thresholds = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.10])
-        # self.calibration_path = Path(calibration_path)
+
+        if config.control_mode == ARXControlModel.JOINT_CONTROLLER:
+            self.joint_thresholds = np.array([0.25, 0.25, 0.25, 0.3, 0.3, 0.3, 0.10])
+        else:
+            self.joint_thresholds = np.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.10])
 
         self.leader_arms = {}
         self.follower_arms = {}
         for key, arm_config in self.config.leader_arms.items():
-            self.leader_arms[key] = ARX5Arm(arm_config, True)
+            self.leader_arms[key] = ARX5Arm(config.control_mode, arm_config, True)
         for key, arm_config in self.config.follower_arms.items():
-            self.follower_arms[key] = ARX5Arm(arm_config, False)
+            self.follower_arms[key] = ARX5Arm(config.control_mode, arm_config, False)
 
         self.cameras = make_cameras_from_configs(self.config.cameras)
         self.is_connected = False
@@ -248,7 +276,7 @@ class ARX5Robot:
             },
             "observation.eef_6d_pose": {
                 "dtype": "float32",
-                "shape": (len(self.follower_arms)*6,),
+                "shape": (len(self.follower_arms)*7,), # 7 = 6d eef space + gripper
             },
         }
 
