@@ -30,7 +30,7 @@ from lerobot.common.policies.pi0fast.configuration_pi0fast import PI0FASTConfig
 from lerobot.common.policies.pretrained import PreTrainedPolicy
 from lerobot.common.policies.tdmpc.configuration_tdmpc import TDMPCConfig
 from lerobot.common.policies.vqbet.configuration_vqbet import VQBeTConfig
-from lerobot.common.policies.rewact_horizon.configuration_rewact import REWACTConfig
+from lerobot.common.policies.rewact.configuration_rewact import RewACTConfig
 from lerobot.common.policies.actvantage_policy import ACTvantageConfig
 from lerobot.configs.policies import PreTrainedConfig
 from lerobot.configs.types import FeatureType
@@ -71,9 +71,9 @@ def get_policy_class(name: str) -> PreTrainedPolicy:
 
         return PI0FASTPolicy
     elif name == "rewact":
-        from lerobot.common.policies.rewact_horizon.modeling_rewact import REWACTPolicy
+        from lerobot.common.policies.rewact.modeling_rewact import RewACTPolicy
 
-        return REWACTPolicy
+        return RewACTPolicy
     else:
         raise NotImplementedError(f"Policy with name {name} is not implemented.")
 
