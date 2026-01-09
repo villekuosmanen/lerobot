@@ -353,10 +353,10 @@ def record_loop(
         # Applies a pipeline to the action, default is IdentityProcessor
         if policy is not None and act_processed_policy is not None:
             action_values = act_processed_policy
-            robot_action_to_send = robot_action_processor((act_processed_policy, obs))
+            robot_action_to_send = robot_action_processor((act_processed_policy))
         else:
             action_values = act_processed_teleop
-            robot_action_to_send = robot_action_processor((act_processed_teleop, obs))
+            robot_action_to_send = robot_action_processor((act_processed_teleop))
 
         # Send action to robot
         # Action can eventually be clipped using `max_relative_target`,
