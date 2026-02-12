@@ -67,6 +67,9 @@ def update_policy(
     lock=None,
 ) -> tuple[MetricsTracker, dict]:
     start_time = time.perf_counter()
+    
+    # dataloading_s = time.perf_counter() - start_time
+    
     device = get_device_from_parameters(policy)
     policy.train()
     with torch.autocast(device_type=device.type) if use_amp else nullcontext():
@@ -161,6 +164,8 @@ def train(cfg: TrainPipelineConfig):
 
     step = 0  # number of policy updates (forward + backward + optim)
 
+    from pathlib import Path
+    cfg.checkpoint_path = Path("outputs/train/pi0_coffee_capsule/checkpoints/014000")
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
@@ -222,7 +227,7 @@ def train(cfg: TrainPipelineConfig):
 
         for key in batch:
             if isinstance(batch[key], torch.Tensor):
-                batch[key] = batch[key].to(device, non_blocking=True)
+                batch[key] = batch[key].to(device, non_blocking=True).to(torch.bfloat16)
 
         train_tracker, output_dict = update_policy(
             train_tracker,

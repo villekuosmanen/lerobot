@@ -155,7 +155,7 @@ def load_training_state(
     load_rng_state(training_state_dir)
     step = load_training_step(training_state_dir)
     optimizer = load_optimizer_state(optimizer, training_state_dir)
-    if scheduler is not None:
-        scheduler = load_scheduler_state(scheduler, training_state_dir)
+    # if scheduler is not None:
+    #     scheduler = load_scheduler_state(scheduler, training_state_dir)
 
     return step, optimizer, scheduler
