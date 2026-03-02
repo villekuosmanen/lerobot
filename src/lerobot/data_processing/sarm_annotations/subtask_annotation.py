@@ -258,7 +258,6 @@ class VideoAnnotator:
         device: str = "cuda",
         torch_dtype: torch.dtype = torch.bfloat16,
         model: Qwen3VLMoeForConditionalGeneration | None = None,  # noqa: F821
-        processor: AutoProcessor | None = None,  # noqa: F821
     ):
         """
         Initialize the video annotator with local model.
@@ -276,9 +275,8 @@ class VideoAnnotator:
         self.device = device
 
         # Use provided model/processor or load new ones
-        if model is not None and processor is not None:
+        if model is not None:
             self.model = model
-            self.processor = processor
             print(f"Using shared model on {device}")
         else:
             from transformers import AutoProcessor, Qwen3VLMoeForConditionalGeneration
@@ -288,10 +286,9 @@ class VideoAnnotator:
             self.model = Qwen3VLMoeForConditionalGeneration.from_pretrained(
                 model_name, torch_dtype=torch_dtype, device_map=device, trust_remote_code=True
             )
-
-            self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-
             print(f"Model loaded successfully on {device}")
+
+        self.processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
 
     def extract_episode_segment(
         self, file_path: Path, start_timestamp: float, end_timestamp: float, target_fps: int = 1
@@ -961,7 +958,7 @@ def main():
         "--dense-only", action="store_true", help="Dense-only mode with auto-generated sparse 'task' stage"
     )
     parser.add_argument("--episodes", type=int, nargs="+", default=None, help="Episode indices to annotate")
-    parser.add_argument("--model", type=str, default="Qwen/Qwen3-VL-30B-A3B-Instruct", help="VLM model")
+    parser.add_argument("--model", type=str, default="Qwen/Qwen3-VL-8B-Instruct", help="VLM model")
     parser.add_argument("--skip-existing", action="store_true", help="Skip already annotated episodes")
     parser.add_argument("--video-key", type=str, default=None, help="Video key (default: first available)")
     parser.add_argument("--push-to-hub", action="store_true", help="Push to HuggingFace Hub")
@@ -1130,7 +1127,6 @@ def main():
                     args.device,
                     torch_dtype,
                     sparse_annotator.model if sparse_annotator else None,
-                    sparse_annotator.processor if sparse_annotator else None,
                 )
                 if dense_mode
                 else None

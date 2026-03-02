@@ -88,7 +88,7 @@ class SARMConfig(PreTrainedConfig):
     pretrained_model_path: str | None = None
     device: str | None = None
     image_key: str = OBS_IMAGES + ".top"  # Key for image used from the dataset
-    state_key: str = OBS_STATE
+    state_key: str = 'observation.state.pos'
 
     # Populated by the processor (video_features, state_features, text_features)
     input_features: dict = field(default_factory=lambda: {})
